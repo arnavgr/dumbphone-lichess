@@ -1,0 +1,19 @@
+name = "lichess-dumbphone"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# Create this KV namespace (Cloudflare dashboard: Workers & Pages > KV > Create),
+# then paste its id below. Used for OAuth login sessions.
+kv_namespaces = [
+  { binding = "KV", id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+]
+
+[vars]
+# Any unique string identifies your app to Lichess - no registration needed,
+# Lichess supports unregistered public OAuth clients. Just keep this constant.
+LICHESS_CLIENT_ID = "lichess-dumbphone"
+
+# Must exactly match your deployed Worker URL + "/callback".
+# Update this after your first deploy, once you know your workers.dev URL
+# (or custom domain).
+REDIRECT_URI = "https://REPLACE-WITH-YOUR-WORKER-SUBDOMAIN.workers.dev/callback"
