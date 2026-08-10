@@ -46,6 +46,14 @@ function timeControlParams(tc) {
   return params;
 }
 
+// Puzzle "step" = number of solution moves already applied, starting at 0.
+// (Number(x || '1') || 1 previously turned a real step=0 into 1, which is
+// what caused the double-advance bug - this parses 0 correctly.)
+function parseStep(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
 // ---------------------------------------------------------------- Home
 
 app.get('/', async (c) => {
@@ -483,7 +491,7 @@ app.get('/puzzle', async (c) => {
   try {
     const data = session ? await lichess.puzzleNext(session.accessToken) : await lichess.puzzleDaily();
     const id = data.puzzle.id;
-    return htmlResponse(redirectPage(`/puzzle/${id}?step=1`, 'Loading puzzle...'));
+    return htmlResponse(redirectPage(`/puzzle/${id}?step=0`, 'Loading puzzle...'));
   } catch (e) {
     return htmlResponse(errorPage('Could not load puzzle', e.message, '/'));
   }
@@ -492,7 +500,7 @@ app.get('/puzzle', async (c) => {
 app.get('/puzzle/:id', async (c) => {
   const session = requireSession(c);
   const id = c.req.param('id');
-  const step = Number(c.req.query('step') || '1') || 1;
+  const step = parseStep(c.req.query('step'));
   const msg = c.req.query('msg');
 
   let puzzle;
@@ -502,7 +510,7 @@ app.get('/puzzle/:id', async (c) => {
     return htmlResponse(errorPage('Could not load puzzle', e.message, '/'));
   }
 
-  const solverColor = sideToMove(puzzleState(puzzle, 1).fen);
+  const solverColor = sideToMove(puzzleState(puzzle, 0).fen);
   const state = puzzleState(puzzle, step);
 
   let body = '';
@@ -532,7 +540,7 @@ app.post('/puzzle/:id', async (c) => {
   const session = requireSession(c);
   const id = c.req.param('id');
   const form = await c.req.parseBody();
-  const step = Number(form.step || '1') || 1;
+  const step = parseStep(form.step);
   const guess = normalizeUci(form.move);
 
   let puzzle;

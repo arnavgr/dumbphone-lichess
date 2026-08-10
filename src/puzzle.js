@@ -1,15 +1,22 @@
-// Lichess puzzle payloads give a full game PGN plus `initialPly` (the ply at
-// which the puzzle position occurs) and a `solution` array of UCI moves.
-// solution[0] is the opponent's "blunder" move which is auto-played the
-// instant the puzzle loads; solution[1] is the first move the solver must
-// find; solution[2] is the opponent's forced reply (auto-played); and so on.
+// Lichess puzzle payloads give a full game PGN plus `initialPly` and a
+// `solution` array of UCI moves. `initialPly` already points past the
+// opponent's setup/blunder move - the FEN at that ply is the position
+// ready for the solver to move. So:
+//   solution[0] is the first move the solver must find
+//   solution[1] is the opponent's forced reply (auto-played)
+//   solution[2] is the solver's second move to find
+//   ...and so on.
+//
+// puzzleState's `step` = number of solution moves already applied on top
+// of the base FEN, starting at 0 (the initial, unsolved position).
 //
 // chess.js runs here on the Worker only (server-side) - the phone never runs
 // any JS, it just gets a fresh rendered board + form on every request.
 
 import { Chess } from 'chess.js';
 
-// Position right before the puzzle starts (before solution[0] is played).
+// Position ready for the solver to move (Lichess's initialPly already
+// accounts for the opponent's setup move having been played).
 export function fenAtInitialPly(pgn, initialPly) {
   const temp = new Chess();
   temp.loadPgn(pgn);
@@ -42,7 +49,8 @@ export function normalizeUci(move) {
 }
 
 // Given a puzzle payload and how many solution moves have been applied so
-// far ("step"), compute the current board FEN and whether the puzzle is solved.
+// far ("step", starting at 0), compute the current board FEN and whether
+// the puzzle is solved.
 export function puzzleState(puzzle, step) {
   const baseFen = fenAtInitialPly(puzzle.game.pgn, puzzle.puzzle.initialPly);
   const solution = puzzle.puzzle.solution || [];

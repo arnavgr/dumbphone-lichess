@@ -5,7 +5,7 @@ compatibility_date = "2024-09-23"
 # Create this KV namespace (Cloudflare dashboard: Workers & Pages > KV > Create),
 # then paste its id below. Used for OAuth login sessions.
 kv_namespaces = [
-  { binding = "dumbphone-lichess-kv", id = "eff4a59826bc447ab730870146869d59" }
+  { binding = "KV", id = "eff4a59826bc447ab730870146869d59" }
 ]
 
 [vars]
@@ -16,4 +16,4 @@ LICHESS_CLIENT_ID = "lichess-dumbphone"
 # Must exactly match your deployed Worker URL + "/callback".
 # Update this after your first deploy, once you know your workers.dev URL
 # (or custom domain).
-REDIRECT_URI = "https://dumbphone-lichess.arnavgr.workers.dev/"
+REDIRECT_URI = "https://dumbphone-lichess.arnavgr.workers.dev/callback"
