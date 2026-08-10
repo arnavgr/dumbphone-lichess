@@ -22,13 +22,7 @@ import {
   selectField,
   renderGamesList,
 } from './ui.js';
-import {
-  VARIANTS,
-  TIME_CONTROLS_WITH_BLITZ,
-  TIME_CONTROLS_NO_BLITZ,
-  findTimeControl,
-  AI_LEVELS,
-} from './constants.js';
+import { VARIANTS, TIME_CONTROLS, findTimeControl, AI_LEVELS } from './constants.js';
 
 const app = new Hono();
 
@@ -59,11 +53,11 @@ app.get('/', async (c) => {
   if (!session) {
     const body = `
 <p>Play real Lichess games on a dumbphone browser.</p>
-<p>Log in with your Lichess account to play standard chess, every Lichess
-variant, versus the built-in AI, against other people, and to solve puzzles -
-all rendered as a plain HTML board with no JavaScript, so it works on old
-browsers like Opera Mini on feature phones.</p>
-<p><a href="/login">&gt;&gt; Login with Lichess</a></p>`;
+<p>You can solve puzzles right away - no login needed. Logging in with your
+Lichess account is optional, and only needed to play vs the AI or against
+other people.</p>
+<p><a href="/puzzle">&gt;&gt; Solve a puzzle (no login needed)</a></p>
+<p><a href="/login">&gt;&gt; Login with Lichess to play games</a></p>`;
     return htmlResponse(page('Lichess Dumbphone', body, session));
   }
 
@@ -197,7 +191,7 @@ app.get('/game/new/ai', async (c) => {
     'random'
   )}</p>
 <p>Variant: ${selectField('variant', VARIANTS, 'standard')}</p>
-<p>Time control: ${selectField('timeControl', TIME_CONTROLS_WITH_BLITZ, 'rapid-600-0')}</p>
+<p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
 <p><input type="submit" value="Start game"></p>
 </form>`;
   return htmlResponse(page('Play vs AI', body, session));
@@ -207,7 +201,7 @@ app.post('/game/new/ai', async (c) => {
   const session = requireSession(c);
   if (!session) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const form = await c.req.parseBody();
-  const tc = findTimeControl(form.timeControl, true);
+  const tc = findTimeControl(form.timeControl);
   const params = {
     level: form.level,
     color: form.color,
@@ -252,7 +246,7 @@ app.get('/game/new/multiplayer', async (c) => {
 <p>Username: <input type="text" name="username" size="16"></p>
 <p>Your color: ${colorField}</p>
 <p>Variant: ${selectField('variant', VARIANTS, 'standard')}</p>
-<p>Time control: ${selectField('timeControl', TIME_CONTROLS_WITH_BLITZ, 'rapid-600-0')}</p>
+<p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
 <p>${ratedField}</p>
 <p><input type="submit" value="Send challenge"></p>
 </form>
@@ -262,18 +256,16 @@ app.get('/game/new/multiplayer', async (c) => {
 Whoever opens it can join and the game starts.</p>
 <form method="post" action="/game/new/multiplayer/open">
 <p>Variant: ${selectField('variant', VARIANTS, 'standard')}</p>
-<p>Time control: ${selectField('timeControl', TIME_CONTROLS_WITH_BLITZ, 'rapid-600-0')}</p>
+<p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
 <p>${ratedField}</p>
 <p><input type="submit" value="Create link"></p>
 </form>
 <hr>
 <h4>3) Quick pair (random opponent)</h4>
-<p>Joins the real Lichess matchmaking pool for up to 20 seconds. Only Rapid,
-Classical or Correspondence are available here - that's a restriction of the
-Lichess Board API itself, not this site.</p>
+<p>Joins the real Lichess matchmaking pool for up to 20 seconds.</p>
 <form method="post" action="/game/new/multiplayer/quick">
 <p>Variant: ${selectField('variant', VARIANTS, 'standard')}</p>
-<p>Time control: ${selectField('timeControl', TIME_CONTROLS_NO_BLITZ, 'rapid-600-0')}</p>
+<p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
 <p>${ratedField}</p>
 <p><input type="submit" value="Find opponent"></p>
 </form>`;
@@ -290,7 +282,7 @@ app.post('/game/new/multiplayer/user', async (c) => {
       errorPage('Missing username', 'Please enter a Lichess username.', '/game/new/multiplayer')
     );
   }
-  const tc = findTimeControl(form.timeControl, true);
+  const tc = findTimeControl(form.timeControl);
   const params = { rated: form.rated, color: form.color, variant: form.variant, ...timeControlParams(tc) };
   try {
     const res = await lichess.challengeUser(session.accessToken, username, params);
@@ -305,7 +297,7 @@ app.post('/game/new/multiplayer/open', async (c) => {
   const session = requireSession(c);
   if (!session) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const form = await c.req.parseBody();
-  const tc = findTimeControl(form.timeControl, true);
+  const tc = findTimeControl(form.timeControl);
   const params = { rated: form.rated, variant: form.variant, ...timeControlParams(tc) };
   try {
     const res = await lichess.challengeOpen(session.accessToken, params);
@@ -325,7 +317,7 @@ app.post('/game/new/multiplayer/quick', async (c) => {
   const session = requireSession(c);
   if (!session) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const form = await c.req.parseBody();
-  const tc = findTimeControl(form.timeControl, false);
+  const tc = findTimeControl(form.timeControl);
   const params = { rated: form.rated, variant: form.variant };
   if (tc.clock) {
     params.time = tc.clock.limit / 60;

@@ -20,7 +20,11 @@ export function htmlResponse(html, status = 200, headers = {}) {
 
 function nav(session) {
   if (!session) {
-    return '<p><a href="/login">&gt;&gt; Login with Lichess</a></p><hr>';
+    return (
+      '<p><a href="/">Home</a> | ' +
+      '<a href="/puzzle">Puzzle (no login needed)</a> | ' +
+      '<a href="/login">Login (optional, needed to play)</a></p><hr>'
+    );
   }
   return (
     `<p>Logged in as <b>${escapeHtml(session.username)}</b><br>` +

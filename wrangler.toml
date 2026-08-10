@@ -16,4 +16,4 @@ LICHESS_CLIENT_ID = "lichess-dumbphone"
 # Must exactly match your deployed Worker URL + "/callback".
 # Update this after your first deploy, once you know your workers.dev URL
 # (or custom domain).
-REDIRECT_URI = "https://REPLACE-WITH-YOUR-WORKER-SUBDOMAIN.workers.dev/callback"
+REDIRECT_URI = "https://dumbphone-lichess.arnavgr.workers.dev/"
