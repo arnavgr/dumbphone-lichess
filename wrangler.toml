@@ -5,7 +5,7 @@ compatibility_date = "2024-09-23"
 # Create this KV namespace (Cloudflare dashboard: Workers & Pages > KV > Create),
 # then paste its id below. Used for OAuth login sessions.
 kv_namespaces = [
-  { binding = "KV", id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+  { binding = "dumbphone-lichess-kv", id = "eff4a59826bc447ab730870146869d59" }
 ]
 
 [vars]
