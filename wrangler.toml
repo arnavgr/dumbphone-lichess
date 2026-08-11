@@ -8,6 +8,14 @@ kv_namespaces = [
   { binding = "KV", id = "eff4a59826bc447ab730870146869d59" }
 ]
 
+# Static assets (the chess piece icons the board renders as /images/*.png).
+# Cloudflare serves any request that matches a file in this directory
+# directly, without invoking the Worker - so this doesn't cost a request
+# to your KV/Lichess-calling code, it's just plain file hosting.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
 [vars]
 # Any unique string identifies your app to Lichess - no registration needed,
 # Lichess supports unregistered public OAuth clients. Just keep this constant.

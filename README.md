@@ -2,8 +2,8 @@
 
 A real Lichess client built to run on feature-phone browsers (Opera Mini on
 Nokia/OEM devices, CloudPhone, etc). No JavaScript anywhere - every page is
-plain HTML (`<table>`, `<form>`, `<a>`) rendered on the server by a Cloudflare
-Worker, using your real Lichess account via OAuth.
+plain HTML rendered on the server by a Cloudflare Worker, using your real
+Lichess account via OAuth.
 
 ## Features
 
@@ -16,6 +16,11 @@ Worker, using your real Lichess account via OAuth.
   2. Open/shareable challenge link (send it to a friend outside Lichess)
   3. "Quick pair" - joins the real matchmaking pool for up to 20 seconds
 - **Puzzles** (daily puzzle, or personalized "next puzzle" once logged in)
+- **Tap-to-move board**: pieces render as real icons, not font glyphs. Tap a
+  piece to select it - its legal destination squares light up green - then
+  tap a destination to play the move. No typing required for ordinary moves.
+  Underpromotion (e.g. `e7e8n`) isn't reachable by tapping, so a small typed
+  fallback field stays available for that.
 - A "Refresh board" link on every game/puzzle page, and, on the home page, a
   plain clickable link straight into your active match (in addition to a
   best-effort meta-refresh) - because some phone browsers don't follow HTTP
@@ -27,9 +32,16 @@ Worker, using your real Lichess account via OAuth.
 - Cloudflare Worker, single `src/index.js` entry using [Hono](https://hono.dev)
   for routing (same stack as your other Worker projects)
 - Cloudflare KV for OAuth login sessions (`KV` binding)
+- Cloudflare Workers static assets (`[assets]` in `wrangler.toml`) serve the
+  chess piece icons from `public/images/*.png` - Cloudflare serves these
+  directly on a matching request path, without invoking the Worker at all
 - [`chess.js`](https://github.com/jhlywa/chess.js) is used **only inside the
-  Worker**, to replay puzzle PGNs into FEN positions - it never ships to the
-  phone
+  Worker** - to replay puzzle PGNs into FEN positions, and to compute legal
+  destination squares for the tap-to-move board's highlighting. It never
+  ships to the phone. (Note: its move generation isn't variant-aware, so on
+  non-standard variants the board's highlighting is best-effort - the actual
+  legality check always happens server-side when a move is submitted to
+  Lichess, so an imperfect highlight never lets an illegal move through.)
 - Talks directly to `https://lichess.org/api` - see
   [lichess.org/api](https://lichess.org/api) for the full reference
 
@@ -60,10 +72,18 @@ context, and explains why Bullet/Blitz are missing where relevant.
    - Leave `LICHESS_CLIENT_ID` as-is, or change it to any string you like -
      Lichess allows unregistered public OAuth clients, so there's no app to
      register on Lichess's side.
-   - You'll fix `REDIRECT_URI` in step 5, after your first deploy (you need
+   - You'll fix `REDIRECT_URI` in step 6, after your first deploy (you need
      to know your `workers.dev` URL first).
 
-4. **Add repo secrets** for GitHub Actions: repo Settings → Secrets and
+4. **Add your piece icons.** Put 12 PNGs in `public/images/`, named exactly
+   `wK.png`, `wQ.png`, `wR.png`, `wB.png`, `wN.png`, `wP.png`, `bK.png`,
+   `bQ.png`, `bR.png`, `bB.png`, `bN.png`, `bP.png` (white/black + piece
+   letter). `public/` sits at the repo root, as a sibling of `src/`. The
+   `[assets]` block already in `wrangler.toml` points at this folder, so
+   nothing else needs configuring - Cloudflare will serve them at
+   `/images/wK.png` etc. automatically.
+
+5. **Add repo secrets** for GitHub Actions: repo Settings → Secrets and
    variables → Actions:
    - `CLOUDFLARE_API_TOKEN` - create one at
      https://dash.cloudflare.com/profile/api-tokens ("Edit Cloudflare
@@ -71,23 +91,25 @@ context, and explains why Bullet/Blitz are missing where relevant.
    - `CLOUDFLARE_ACCOUNT_ID` - found on the right-hand side of any page in
      the Cloudflare dashboard
 
-5. **Push to `main`.** GitHub Actions (`.github/workflows/deploy.yml`) runs
+6. **Push to `main`.** GitHub Actions (`.github/workflows/deploy.yml`) runs
    `wrangler deploy` automatically. Once it succeeds, find your Worker's URL
    in the Cloudflare dashboard (something like
    `https://lichess-dumbphone.<your-subdomain>.workers.dev`).
 
-6. **Set `REDIRECT_URI`** in `wrangler.toml` to
+7. **Set `REDIRECT_URI`** in `wrangler.toml` to
    `https://<that-url>/callback`, commit, and let Actions redeploy. This
    step matters: Lichess checks that the `redirect_uri` used at login time
    exactly matches the one used when exchanging the code for a token, and
    this app uses the `REDIRECT_URI` var for both.
 
-7. Visit your Worker URL on your phone and tap **Login with Lichess**.
+8. Visit your Worker URL on your phone and tap **Login with Lichess**.
 
 ## Playing
 
-- Moves are typed as **from-square + to-square** (UCI format), e.g. `e2e4`.
-  For a promotion, add the piece letter: `e7e8q`.
+- Tap a piece to select it - legal destinations highlight green - then tap
+  one to play the move.
+- For underpromotion (anything other than queen, e.g. `e7e8n`), use the
+  small typed-move field below the board instead of tapping.
 - Board orientation always shows your own pieces at the bottom.
 - Every game page has a **Refresh board** link - since there's no
   JavaScript, nothing updates automatically; reload to see the opponent's
@@ -110,3 +132,9 @@ field name has drifted from what's documented at lichess.org/api:
   streaming client, not a click-and-wait phone page - it may occasionally
   report "no opponent found" even when one was actually found a moment
   after the 20s window closed. If that happens, refresh the home page.
+- The tap-to-move board submits moves via a GET link's querystring (the
+  only way to get a clickable action with zero JavaScript). Responses that
+  execute a move are sent with `Cache-Control: no-store` to discourage
+  Opera Mini's proxy or any CDN from caching/replaying them, but if your
+  phone's browser does something unusual with back-navigation on a played
+  move, that's the mechanism to look at first.

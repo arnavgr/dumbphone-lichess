@@ -26,6 +26,17 @@ import { VARIANTS, TIME_CONTROLS, findTimeControl, AI_LEVELS } from './constants
 
 const app = new Hono();
 
+// Tap-to-move works by carrying the move in a GET link's querystring, which
+// is a real side effect (submits to Lichess) even though it's a GET - the
+// only way to get a clickable, no-typing move on a browser with no JS.
+// Opera Mini's proxy (and some CDNs) can be aggressive about caching GET
+// responses, so anything that just executed a move is marked no-store to
+// avoid a stale/replayed page on back-navigation or refresh.
+const NO_STORE = { 'Cache-Control': 'no-store' };
+
+const UCI_MOVE_RE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+const SQUARE_RE = /^[a-h][1-8]$/;
+
 app.use('*', async (c, next) => {
   c.set('session', await getSession(c));
   await next();
@@ -47,11 +58,21 @@ function timeControlParams(tc) {
 }
 
 // Puzzle "step" = number of solution moves already applied, starting at 0.
-// (Number(x || '1') || 1 previously turned a real step=0 into 1, which is
-// what caused the double-advance bug - this parses 0 correctly.)
 function parseStep(raw) {
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+// Shared by the tap-to-move GET handler and the typed-move POST fallback.
+function checkPuzzleGuess(puzzle, step, guess) {
+  const solution = puzzle.puzzle.solution || [];
+  const expected = String(solution[step] || '').toLowerCase();
+  if (guess && guess === expected) {
+    let newStep = step + 1;
+    if (solution[newStep]) newStep += 1; // auto-play the opponent's forced reply
+    return { correct: true, newStep };
+  }
+  return { correct: false };
 }
 
 // ---------------------------------------------------------------- Home
@@ -387,6 +408,29 @@ app.get('/game/:id', async (c) => {
   if (!session) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const id = c.req.param('id');
 
+  // A highlighted destination square was tapped - actually submit the move
+  // to Lichess. This is a real side effect via GET; see the NO_STORE note
+  // above for why the response is marked non-cacheable.
+  const moveParam = (c.req.query('move') || '').toLowerCase();
+  if (moveParam) {
+    if (!UCI_MOVE_RE.test(moveParam)) {
+      return htmlResponse(
+        errorPage('Invalid move', 'That move was not understood.', `/game/${id}`),
+        400,
+        NO_STORE
+      );
+    }
+    try {
+      await lichess.boardMove(session.accessToken, id, moveParam);
+      return htmlResponse(redirectPage(`/game/${id}`, 'Move played.'), 200, NO_STORE);
+    } catch (e) {
+      return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}`), 200, NO_STORE);
+    }
+  }
+
+  const selectedParam = (c.req.query('selected') || '').toLowerCase();
+  const selected = SQUARE_RE.test(selectedParam) ? selectedParam : null;
+
   let game = null;
   let error = null;
   try {
@@ -401,11 +445,23 @@ app.get('/game/:id', async (c) => {
 
   if (game) {
     const orientation = game.color === 'black' ? 'black' : 'white';
-    body += renderBoard(game.fen, orientation);
+    const canMove = !!game.isMyTurn;
+
+    body += renderBoard(game.fen, orientation, {
+      interactive: canMove,
+      selected: canMove ? selected : null,
+      isOwnPiece: (square, piece) =>
+        game.color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase(),
+      selectHref: (square) => `/game/${escapeHtml(id)}?selected=${square}`,
+      moveHref: (uci) => `/game/${escapeHtml(id)}?move=${uci}`,
+    });
+
     body += `<p>Playing as <b>${escapeHtml(game.color)}</b> vs <b>${escapeHtml(
       (game.opponent && game.opponent.username) || '?'
     )}</b></p>`;
-    body += `<p>${game.isMyTurn ? '<b>Your move.</b>' : 'Waiting for opponent...'}</p>`;
+    body += `<p>${
+      game.isMyTurn ? '<b>Your move - tap a piece, then tap a highlighted square.</b>' : 'Waiting for opponent...'
+    }</p>`;
     if (typeof game.secondsLeft === 'number') {
       const m = Math.floor(game.secondsLeft / 60);
       const s = game.secondsLeft % 60;
@@ -413,12 +469,14 @@ app.get('/game/:id', async (c) => {
     }
     body += `<p><a href="/game/${escapeHtml(id)}">Refresh board</a></p>`;
 
-    if (game.isMyTurn) {
+    if (canMove) {
+      if (selected) {
+        body += `<p><a href="/game/${escapeHtml(id)}">[Cancel selection]</a></p>`;
+      }
       body += `
 <form method="post" action="/game/${escapeHtml(id)}/move">
-<p>Move, e.g. e2e4 (from-square then to-square). For promotion add the piece
-letter, e.g. e7e8q.</p>
-<p><input type="text" name="move" size="8" maxlength="6"> <input type="submit" value="Play move"></p>
+<p style="font-size:12px;">Need underpromotion (e.g. e7e8n)? Type the move instead:
+<input type="text" name="move" size="8" maxlength="6"> <input type="submit" value="Play"></p>
 </form>`;
     }
     body += `
@@ -462,13 +520,17 @@ app.post('/game/:id/move', async (c) => {
   const form = await c.req.parseBody();
   const move = normalizeUci(form.move);
   if (!move) {
-    return htmlResponse(errorPage('Invalid move', 'Please enter a move like e2e4.', `/game/${id}`));
+    return htmlResponse(
+      errorPage('Invalid move', 'Please enter a move like e2e4.', `/game/${id}`),
+      400,
+      NO_STORE
+    );
   }
   try {
     await lichess.boardMove(session.accessToken, id, move);
-    return htmlResponse(redirectPage(`/game/${id}`, 'Move played.'));
+    return htmlResponse(redirectPage(`/game/${id}`, 'Move played.'), 200, NO_STORE);
   } catch (e) {
-    return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}`));
+    return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}`), 200, NO_STORE);
   }
 });
 
@@ -478,9 +540,9 @@ app.post('/game/:id/resign', async (c) => {
   const id = c.req.param('id');
   try {
     await lichess.boardResign(session.accessToken, id);
-    return htmlResponse(redirectPage('/', 'You resigned.'));
+    return htmlResponse(redirectPage('/', 'You resigned.'), 200, NO_STORE);
   } catch (e) {
-    return htmlResponse(errorPage('Could not resign', e.message, `/game/${id}`));
+    return htmlResponse(errorPage('Could not resign', e.message, `/game/${id}`), 200, NO_STORE);
   }
 });
 
@@ -510,6 +572,35 @@ app.get('/puzzle/:id', async (c) => {
     return htmlResponse(errorPage('Could not load puzzle', e.message, '/'));
   }
 
+  // A highlighted destination square was tapped - check it against the
+  // puzzle solution. Same real-side-effect-via-GET pattern as game moves.
+  const moveParam = (c.req.query('move') || '').toLowerCase();
+  if (moveParam) {
+    if (!UCI_MOVE_RE.test(moveParam)) {
+      return htmlResponse(
+        errorPage('Invalid move', 'That move was not understood.', `/puzzle/${id}?step=${step}`),
+        400,
+        NO_STORE
+      );
+    }
+    const result = checkPuzzleGuess(puzzle, step, moveParam);
+    if (result.correct) {
+      return htmlResponse(
+        redirectPage(`/puzzle/${id}?step=${result.newStep}&msg=correct`, 'Correct!'),
+        200,
+        NO_STORE
+      );
+    }
+    return htmlResponse(
+      redirectPage(`/puzzle/${id}?step=${step}&msg=wrong`, 'Not quite, try again.'),
+      200,
+      NO_STORE
+    );
+  }
+
+  const selectedParam = (c.req.query('selected') || '').toLowerCase();
+  const selected = SQUARE_RE.test(selectedParam) ? selectedParam : null;
+
   const solverColor = sideToMove(puzzleState(puzzle, 0).fen);
   const state = puzzleState(puzzle, step);
 
@@ -517,18 +608,34 @@ app.get('/puzzle/:id', async (c) => {
   if (msg === 'wrong') body += '<p><b>Not quite - try again.</b></p>';
   if (msg === 'correct') body += '<p><b>Correct!</b></p>';
 
-  body += renderBoard(state.fen, solverColor);
+  if (state.solved) {
+    body += renderBoard(state.fen, solverColor);
+  } else {
+    body += renderBoard(state.fen, solverColor, {
+      interactive: true,
+      selected,
+      isOwnPiece: (square, piece) =>
+        solverColor === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase(),
+      selectHref: (square) => `/puzzle/${escapeHtml(id)}?step=${state.step}&selected=${square}`,
+      moveHref: (uci) => `/puzzle/${escapeHtml(id)}?step=${state.step}&move=${uci}`,
+    });
+  }
   body += `<p>Puzzle rating: ${escapeHtml(puzzle.puzzle.rating)}</p>`;
 
   if (state.solved) {
     body += '<p><b>Puzzle solved!</b></p>';
     body += '<p><a href="/puzzle">Next puzzle</a></p>';
   } else {
-    body += `<p>Find the best move for <b>${escapeHtml(sideToMove(state.fen))}</b>. Enter it like e2e4.</p>`;
+    body += `<p>Find the best move for <b>${escapeHtml(
+      sideToMove(state.fen)
+    )}</b> - tap a piece, then tap a highlighted square.</p>`;
+    if (selected) {
+      body += `<p><a href="/puzzle/${escapeHtml(id)}?step=${state.step}">[Cancel selection]</a></p>`;
+    }
     body += `
 <form method="post" action="/puzzle/${escapeHtml(id)}">
 <input type="hidden" name="step" value="${state.step}">
-<p><input type="text" name="move" size="8" maxlength="6"> <input type="submit" value="Submit move"></p>
+<p style="font-size:12px;">Or type a move: <input type="text" name="move" size="8" maxlength="6"> <input type="submit" value="Submit"></p>
 </form>`;
   }
   body += `<p><a href="/puzzle/${escapeHtml(id)}?step=${state.step}">Refresh</a> | <a href="/puzzle">New puzzle</a></p>`;
@@ -550,15 +657,19 @@ app.post('/puzzle/:id', async (c) => {
     return htmlResponse(errorPage('Could not load puzzle', e.message, '/'));
   }
 
-  const solution = puzzle.puzzle.solution || [];
-  const expected = String(solution[step] || '').toLowerCase();
-
-  if (guess && guess === expected) {
-    let newStep = step + 1;
-    if (solution[newStep]) newStep += 1; // auto-play the opponent's forced reply
-    return htmlResponse(redirectPage(`/puzzle/${id}?step=${newStep}&msg=correct`, 'Correct!'));
+  const result = checkPuzzleGuess(puzzle, step, guess);
+  if (result.correct) {
+    return htmlResponse(
+      redirectPage(`/puzzle/${id}?step=${result.newStep}&msg=correct`, 'Correct!'),
+      200,
+      NO_STORE
+    );
   }
-  return htmlResponse(redirectPage(`/puzzle/${id}?step=${step}&msg=wrong`, 'Not quite, try again.'));
+  return htmlResponse(
+    redirectPage(`/puzzle/${id}?step=${step}&msg=wrong`, 'Not quite, try again.'),
+    200,
+    NO_STORE
+  );
 });
 
 // ---------------------------------------------------------------- Fallbacks
