@@ -13,6 +13,7 @@ import {
 import * as lichess from './lichessApi.js';
 import { renderBoard, sideToMove } from './board.js';
 import { puzzleState, normalizeUci } from './puzzle.js';
+import { pickAiMove, applyAiMove } from './localAi.js';
 import {
   page,
   redirectPage,
@@ -22,20 +23,25 @@ import {
   selectField,
   renderGamesList,
 } from './ui.js';
-import { VARIANTS, TIME_CONTROLS, findTimeControl, AI_LEVELS } from './constants.js';
+import { VARIANTS, TIME_CONTROLS, findTimeControl, AI_LEVELS, LOCAL_AI_LEVELS } from './constants.js';
 
 const app = new Hono();
 
 // Tap-to-move works by carrying the move in a GET link's querystring, which
-// is a real side effect (submits to Lichess) even though it's a GET - the
-// only way to get a clickable, no-typing move on a browser with no JS.
-// Opera Mini's proxy (and some CDNs) can be aggressive about caching GET
+// is a real side effect (submits a move) even though it's a GET - the only
+// way to get a clickable, no-typing move on a browser with no JS. Opera
+// Mini's proxy (and some CDNs) can be aggressive about caching GET
 // responses, so anything that just executed a move is marked no-store to
 // avoid a stale/replayed page on back-navigation or refresh.
 const NO_STORE = { 'Cache-Control': 'no-store' };
 
 const UCI_MOVE_RE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
 const SQUARE_RE = /^[a-h][1-8]$/;
+
+// Scopes this app ever needs from a Lichess account, used both for the
+// OAuth authorize request and to pre-check the right boxes on Lichess's own
+// "create a personal token" page (see /login).
+const LICHESS_SCOPES = ['board:play', 'challenge:read', 'challenge:write', 'puzzle:read'];
 
 app.use('*', async (c, next) => {
   c.set('session', await getSession(c));
@@ -82,11 +88,12 @@ app.get('/', async (c) => {
   if (!session) {
     const body = `
 <p>Play real Lichess games on a dumbphone browser.</p>
-<p>You can solve puzzles right away - no login needed. Logging in with your
-Lichess account is optional, and only needed to play vs the AI or against
-other people.</p>
+<p>You can solve puzzles or play vs a computer opponent right away - no
+login needed for either. Logging in with your Lichess account is only
+needed for real multiplayer games against other people.</p>
 <p><a href="/puzzle">&gt;&gt; Solve a puzzle (no login needed)</a></p>
-<p><a href="/login">&gt;&gt; Login with Lichess to play games</a></p>`;
+<p><a href="/ai">&gt;&gt; Play vs a computer (no login needed)</a></p>
+<p><a href="/login">&gt;&gt; Login with Lichess to play real multiplayer games</a></p>`;
     return htmlResponse(page('Lichess Dumbphone', body, session));
   }
 
@@ -114,7 +121,8 @@ other people.</p>
 
   body += '<p><a href="/">Refresh</a></p><hr>';
   body +=
-    '<p><a href="/game/new/ai">Play vs AI</a> | ' +
+    '<p><a href="/game/new/ai">Play vs AI (Lichess)</a> | ' +
+    '<a href="/ai">Play vs AI (local)</a> | ' +
     '<a href="/game/new/multiplayer">Play multiplayer</a> | ' +
     '<a href="/puzzle">Solve a puzzle</a></p>';
 
@@ -122,8 +130,49 @@ other people.</p>
 });
 
 // ---------------------------------------------------------------- Auth
+//
+// Two ways to log in:
+//   A) /login/oauth - the normal OAuth2+PKCE redirect to lichess.org
+//   B) /login/token - paste a personal API token created on any browser,
+//      no redirect through lichess.org's own pages at all. Useful if
+//      lichess.org's website doesn't render well on this particular phone.
+
+function tokenCreateUrl() {
+  const url = new URL('https://lichess.org/account/oauth/token/create');
+  for (const scope of LICHESS_SCOPES) url.searchParams.append('scopes[]', scope);
+  url.searchParams.set('description', 'dumbphone-lichess');
+  return url.toString();
+}
 
 app.get('/login', async (c) => {
+  const session = requireSession(c);
+  const configured = c.env.LICHESS_CLIENT_ID && c.env.REDIRECT_URI;
+
+  let body = '<h4>Option A - Login via Lichess</h4>';
+  body +=
+    "<p>Redirects to lichess.org to sign in there. If lichess.org's own pages " +
+    'don\'t render well on your phone, use Option B below instead.</p>';
+  body += configured
+    ? '<p><a href="/login/oauth">&gt;&gt; Continue to Lichess</a></p>'
+    : "<p>Not available right now: LICHESS_CLIENT_ID / REDIRECT_URI aren't set in wrangler.toml.</p>";
+
+  body += '<hr>';
+  body += '<h4>Option B - Paste a personal API token</h4>';
+  body +=
+    '<p>Works entirely on this page, no redirect. Create a token once on ' +
+    'any browser - even one that is not this phone - then paste it below.</p>';
+  body += `<p><a href="${escapeHtml(tokenCreateUrl())}">&gt;&gt; Create a token on lichess.org</a> ` +
+    '(opens with the right permissions already checked)</p>';
+  body += `
+<form method="post" action="/login/token">
+<p>Paste your token: <input type="text" name="token" size="30"></p>
+<p><input type="submit" value="Log in with token"></p>
+</form>`;
+
+  return htmlResponse(page('Login', body, session));
+});
+
+app.get('/login/oauth', async (c) => {
   const clientId = c.env.LICHESS_CLIENT_ID;
   const redirectUri = c.env.REDIRECT_URI;
   if (!clientId || !redirectUri) {
@@ -140,12 +189,11 @@ app.get('/login', async (c) => {
   await saveOAuthState(c, state, verifier);
   const challenge = await codeChallengeS256(verifier);
 
-  const scope = ['board:play', 'challenge:read', 'challenge:write', 'puzzle:read'].join(' ');
   const authUrl = new URL('https://lichess.org/oauth');
   authUrl.searchParams.set('response_type', 'code');
   authUrl.searchParams.set('client_id', clientId);
   authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('scope', scope);
+  authUrl.searchParams.set('scope', LICHESS_SCOPES.join(' '));
   authUrl.searchParams.set('code_challenge_method', 'S256');
   authUrl.searchParams.set('code_challenge', challenge);
   authUrl.searchParams.set('state', state);
@@ -195,6 +243,29 @@ app.get('/callback', async (c) => {
   }
 });
 
+app.post('/login/token', async (c) => {
+  const form = await c.req.parseBody();
+  const token = String(form.token || '').trim();
+  if (!token) {
+    return htmlResponse(errorPage('Missing token', 'Please paste a Lichess API token.', '/login'), 400);
+  }
+  try {
+    const account = await lichess.getAccount(token);
+    const sid = await createSession(c, { accessToken: token, username: account.username });
+    c.header('Set-Cookie', sessionCookie(sid));
+    return htmlResponse(redirectPage('/', `Logged in as ${account.username}.`));
+  } catch (e) {
+    return htmlResponse(
+      errorPage(
+        'Login failed',
+        `That token didn't work (${e.message}). Double-check you created it using the link above and pasted it in full.`,
+        '/login'
+      ),
+      400
+    );
+  }
+});
+
 app.get('/logout', async (c) => {
   const session = requireSession(c);
   if (session) await destroySession(c, session.id);
@@ -202,7 +273,7 @@ app.get('/logout', async (c) => {
   return htmlResponse(redirectPage('/', 'Logged out.'));
 });
 
-// ---------------------------------------------------------------- New game vs AI
+// ---------------------------------------------------------------- New game vs AI (Lichess-hosted)
 
 app.get('/game/new/ai', async (c) => {
   const session = requireSession(c);
@@ -223,7 +294,7 @@ app.get('/game/new/ai', async (c) => {
 <p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
 <p><input type="submit" value="Start game"></p>
 </form>`;
-  return htmlResponse(page('Play vs AI', body, session));
+  return htmlResponse(page('Play vs AI (Lichess)', body, session));
 });
 
 app.post('/game/new/ai', async (c) => {
@@ -401,7 +472,163 @@ app.get('/challenge/:id', async (c) => {
   return htmlResponse(page('Challenge status', body, session));
 });
 
-// ---------------------------------------------------------------- Game board
+// ---------------------------------------------------------------- vs AI, no login (local engine)
+//
+// Fully independent of Lichess - no account, no token, no OAuth. Move
+// legality and game-over detection run through chess.js; the AI's replies
+// come from src/localAi.js. All state lives in the URL (the current FEN),
+// so there's nothing to store server-side and nothing to expire.
+
+app.get('/ai', async (c) => {
+  const session = requireSession(c);
+  const body = `
+<p>Play vs a computer opponent - no Lichess account needed. Moves are
+validated locally; the AI's replies come from a free remote engine (or
+random legal moves at difficulty 0, if you'd rather just have fun).</p>
+<form method="get" action="/ai/play">
+<p>Difficulty: ${selectField('diff', LOCAL_AI_LEVELS, 1)}</p>
+<p>Your color: ${selectField(
+    'color',
+    [
+      { value: 'w', label: 'White' },
+      { value: 'b', label: 'Black' },
+    ],
+    'w'
+  )}</p>
+<p><input type="submit" value="Start game"></p>
+</form>`;
+  return htmlResponse(page('Play vs AI (no login)', body, session));
+});
+
+app.get('/ai/play', async (c) => {
+  const session = requireSession(c);
+  const q = c.req.query();
+
+  let diff = parseInt(q.diff, 10);
+  if (!Number.isFinite(diff) || diff < 0) diff = 1;
+  if (diff > 4) diff = 4;
+  const color = q.color === 'b' ? 'b' : 'w';
+  const fenParam = q.fen || null;
+
+  const moveParam = (q.move || '').toLowerCase();
+  const selectedParam = (q.selected || '').toLowerCase();
+  const selected = SQUARE_RE.test(selectedParam) ? selectedParam : null;
+
+  // Builds a /ai/play?... link carrying the current diff/color plus
+  // whatever's overridden in `extra` (fen, selected, move, a new diff...).
+  const linkBase = (extra = {}) => {
+    const params = new URLSearchParams();
+    params.set('diff', String(diff));
+    params.set('color', color);
+    for (const [k, v] of Object.entries(extra)) params.set(k, String(v));
+    return `/ai/play?${params.toString()}`;
+  };
+
+  let chess;
+  let resetMessage = null;
+  try {
+    chess = fenParam ? new Chess(fenParam) : new Chess();
+  } catch {
+    chess = new Chess();
+    resetMessage = 'That position was invalid, so this is a fresh game.';
+  }
+
+  // Fresh game where the human plays Black - let the AI (White) open.
+  if (!fenParam && color === 'b' && !resetMessage) {
+    const aiMove = await pickAiMove(chess, diff);
+    applyAiMove(chess, aiMove);
+  }
+
+  // A highlighted destination square was tapped - play it, then (if the
+  // game isn't over) let the AI reply immediately, before rendering.
+  if (moveParam) {
+    if (!UCI_MOVE_RE.test(moveParam)) {
+      return htmlResponse(
+        errorPage('Invalid move', 'That move was not understood.', linkBase({ fen: chess.fen() })),
+        400,
+        NO_STORE
+      );
+    }
+    const from = moveParam.slice(0, 2);
+    const to = moveParam.slice(2, 4);
+    const promotion = moveParam.slice(4, 5) || undefined;
+    try {
+      chess.move({ from, to, promotion });
+    } catch {
+      return htmlResponse(
+        errorPage('Illegal move', `${from}-${to} is not legal there.`, linkBase({ fen: chess.fen() })),
+        200,
+        NO_STORE
+      );
+    }
+    if (!chess.isGameOver()) {
+      const aiMove = await pickAiMove(chess, diff);
+      applyAiMove(chess, aiMove);
+    }
+    return htmlResponse(redirectPage(linkBase({ fen: chess.fen() }), 'Move played.'), 200, NO_STORE);
+  }
+
+  const orientation = color === 'b' ? 'black' : 'white';
+  const isOver = chess.isGameOver();
+  const humanTurn = !isOver && chess.turn() === color;
+
+  let message;
+  let msgColor;
+  if (resetMessage) {
+    message = resetMessage;
+    msgColor = '#cc0000';
+  } else if (chess.isCheckmate()) {
+    message = 'Checkmate! Game over.';
+    msgColor = '#000099';
+  } else if (chess.isDraw()) {
+    message = 'Draw. Game over.';
+    msgColor = '#000099';
+  } else if (chess.isCheck()) {
+    message = 'Check! Your move.';
+    msgColor = '#cc0000';
+  } else if (humanTurn) {
+    message = 'Your move - tap a piece, then tap a highlighted square.';
+    msgColor = '#006600';
+  } else {
+    message = 'Waiting on the AI...';
+    msgColor = '#666666';
+  }
+
+  let body = `<p><b style="color:${msgColor};">${escapeHtml(message)}</b></p>`;
+
+  body += renderBoard(chess.fen(), orientation, {
+    interactive: humanTurn,
+    selected: humanTurn ? selected : null,
+    isOwnPiece: (square, piece) =>
+      color === 'w' ? piece === piece.toUpperCase() : piece === piece.toLowerCase(),
+    selectHref: (square) => linkBase({ fen: chess.fen(), selected: square }),
+    moveHref: (uci) => linkBase({ fen: chess.fen(), move: uci }),
+  });
+
+  if (humanTurn && selected) {
+    body += `<p><a href="${linkBase({ fen: chess.fen() })}">[Cancel selection]</a></p>`;
+  }
+  body += `<p><a href="${linkBase({ fen: chess.fen() })}">Refresh</a></p>`;
+
+  body += '<div style="margin-top:10px;font-size:12px;"><b>Difficulty:</b> ';
+  body += LOCAL_AI_LEVELS.map((l) =>
+    String(l.value) === String(diff)
+      ? `<b>[${l.value}]</b>`
+      : `<a href="${linkBase({ fen: chess.fen(), diff: String(l.value) })}">${l.value}</a>`
+  ).join(' ');
+  body += '</div>';
+
+  body += `
+<div style="margin-top:10px;font-size:12px;">
+<b>New game:</b>
+<a href="/ai/play?diff=${diff}&color=w">White</a> |
+<a href="/ai/play?diff=${diff}&color=b">Black</a>
+</div>`;
+
+  return htmlResponse(page('Play vs AI (no login)', body, session));
+});
+
+// ---------------------------------------------------------------- Game board (Lichess-hosted)
 
 app.get('/game/:id', async (c) => {
   const session = requireSession(c);

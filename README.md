@@ -2,25 +2,34 @@
 
 A real Lichess client built to run on feature-phone browsers (Opera Mini on
 Nokia/OEM devices, CloudPhone, etc). No JavaScript anywhere - every page is
-plain HTML rendered on the server by a Cloudflare Worker, using your real
-Lichess account via OAuth.
+plain HTML rendered on the server by a Cloudflare Worker.
 
 ## Features
 
-- **Login with Lichess** (OAuth2 + PKCE, no password ever touches this app)
-- **All Lichess variants**: Standard, Chess960, Crazyhouse, Antichess, Atomic,
-  Horde, King of the Hill, Racing Kings, Three-check
-- **Play vs the Lichess AI** (levels 1-8)
-- **Multiplayer**, three ways:
-  1. Direct challenge to a Lichess username
-  2. Open/shareable challenge link (send it to a friend outside Lichess)
-  3. "Quick pair" - joins the real matchmaking pool for up to 20 seconds
-- **Puzzles** (daily puzzle, or personalized "next puzzle" once logged in)
-- **Tap-to-move board**: pieces render as real icons, not font glyphs. Tap a
-  piece to select it - its legal destination squares light up green - then
-  tap a destination to play the move. No typing required for ordinary moves.
-  Underpromotion (e.g. `e7e8n`) isn't reachable by tapping, so a small typed
-  fallback field stays available for that.
+- **Two ways to log in**, for real Lichess games:
+  1. Standard OAuth2 + PKCE redirect to lichess.org
+  2. Paste a personal API token you create yourself on any browser - avoids
+     ever loading lichess.org's own pages on the dumbphone at all
+- **Play vs a computer with no login and no Lichess account** - a fully
+  local mode using `chess.js` for legality/checkmate detection and a free
+  remote engine for the AI's moves (falls back to random legal moves if
+  that service is unavailable)
+- **Puzzles**, also with no login needed (daily puzzle; personalized "next
+  puzzle" once logged in)
+- **Login-required features** (need *some* Lichess account, because they're
+  built on Lichess's Board API, which requires an authenticated token for
+  every operation - there's no anonymous mode for these, by design of the
+  API itself):
+  - Play vs the real Lichess AI (levels 1-8, recorded on your profile)
+  - Multiplayer: direct challenge, shareable open-challenge link, or "quick
+    pair" into the real matchmaking pool
+  - All Lichess variants: Standard, Chess960, Crazyhouse, Antichess, Atomic,
+    Horde, King of the Hill, Racing Kings, Three-check
+- **Tap-to-move board** everywhere a board appears: pieces render as real
+  icons, not font glyphs. Tap a piece to select it - legal destinations
+  light up green - then tap one to play the move. A small typed-move
+  fallback field stays available for underpromotion (e.g. `e7e8n`), which
+  isn't reachable by tapping.
 - A "Refresh board" link on every game/puzzle page, and, on the home page, a
   plain clickable link straight into your active match (in addition to a
   best-effort meta-refresh) - because some phone browsers don't follow HTTP
@@ -30,30 +39,40 @@ Lichess account via OAuth.
 ## How it's built
 
 - Cloudflare Worker, single `src/index.js` entry using [Hono](https://hono.dev)
-  for routing (same stack as your other Worker projects)
-- Cloudflare KV for OAuth login sessions (`KV` binding)
+  for routing
+- Cloudflare KV for OAuth/token login sessions (`KV` binding)
 - Cloudflare Workers static assets (`[assets]` in `wrangler.toml`) serve the
-  chess piece icons from `public/images/*.png` - Cloudflare serves these
-  directly on a matching request path, without invoking the Worker at all
+  chess piece icons from `public/images/*.png`
 - [`chess.js`](https://github.com/jhlywa/chess.js) is used **only inside the
-  Worker** - to replay puzzle PGNs into FEN positions, and to compute legal
-  destination squares for the tap-to-move board's highlighting. It never
-  ships to the phone. (Note: its move generation isn't variant-aware, so on
-  non-standard variants the board's highlighting is best-effort - the actual
-  legality check always happens server-side when a move is submitted to
-  Lichess, so an imperfect highlight never lets an illegal move through.)
-- Talks directly to `https://lichess.org/api` - see
-  [lichess.org/api](https://lichess.org/api) for the full reference
+  Worker**, never shipped to the phone:
+  - `src/puzzle.js` - replays puzzle PGNs into FEN positions
+  - `src/board.js` - computes legal destination squares for the tap-to-move
+    board's highlighting (best-effort on non-standard variants - the real
+    legality check always happens server-side, either by chess.js itself
+    for the anonymous AI mode, or by Lichess when a move is submitted to a
+    real game, so an imperfect highlight never lets an illegal move through)
+  - `src/localAi.js` - runs the entire anonymous vs-AI mode: legality,
+    check/checkmate/draw detection, all local, no Lichess API call anywhere
+    in that file
+- Talks directly to `https://lichess.org/api` for everything login-required
+  - see [lichess.org/api](https://lichess.org/api) for the full reference
+- Talks to `https://chess-api.com` (a free third-party service, not
+  affiliated with Lichess or this project) for the anonymous AI mode's
+  moves at difficulty 1-4
 
 ### A note on the Board API's limits (not a limitation of this app)
 
-Lichess's Board API - which this whole site is built on, since it's the API
-designed for third-party clients like this one - has two hard restrictions:
+Lichess's Board API - which every *login-required* feature here is built on,
+since it's the API designed for third-party clients like this one - has two
+hard restrictions:
 
 - The real matchmaking pool (`/api/board/seek`, used by "Quick pair") only
   works for **Rapid, Classical, and Correspondence**.
 - AI games and direct/open challenges also allow **Blitz**.
 - **Bullet is not available at all** through the Board API, in any mode.
+- **Nothing in the Board API works without an authenticated token** - this
+  is why real multiplayer can't be made anonymous in this app; it's a
+  property of the API itself, not a setting this app could relax.
 
 The app's forms only offer the time controls Lichess actually allows in each
 context, and explains why Bullet/Blitz are missing where relevant.
@@ -71,7 +90,8 @@ context, and explains why Bullet/Blitz are missing where relevant.
    - Paste the KV namespace ID into the `kv_namespaces` entry.
    - Leave `LICHESS_CLIENT_ID` as-is, or change it to any string you like -
      Lichess allows unregistered public OAuth clients, so there's no app to
-     register on Lichess's side.
+     register on Lichess's side. This only matters for the OAuth login
+     path; the paste-a-token login path doesn't use it.
    - You'll fix `REDIRECT_URI` in step 6, after your first deploy (you need
      to know your `workers.dev` URL first).
 
@@ -98,11 +118,33 @@ context, and explains why Bullet/Blitz are missing where relevant.
 
 7. **Set `REDIRECT_URI`** in `wrangler.toml` to
    `https://<that-url>/callback`, commit, and let Actions redeploy. This
-   step matters: Lichess checks that the `redirect_uri` used at login time
-   exactly matches the one used when exchanging the code for a token, and
-   this app uses the `REDIRECT_URI` var for both.
+   only matters for the OAuth login path - Lichess checks that the
+   `redirect_uri` used at login time exactly matches the one used when
+   exchanging the code for a token, and this app uses the `REDIRECT_URI`
+   var for both. The paste-a-token login path has no redirect_uri at all,
+   so it works even before this step.
 
-8. Visit your Worker URL on your phone and tap **Login with Lichess**.
+8. Visit your Worker URL. **Puzzles** and **vs AI (local)** work
+   immediately, no login. For real multiplayer, tap **Login** and pick
+   whichever of the two options renders better on your phone.
+
+## Logging in
+
+There are two ways, both reachable from `/login`:
+
+- **Via Lichess** - the standard OAuth redirect. If lichess.org's own site
+  doesn't render well on your phone's browser, this may not work - use the
+  option below instead.
+- **Paste a personal API token** - tap the "Create a token on lichess.org"
+  link (works from *any* browser, not necessarily the dumbphone - a
+  computer or a different phone is fine), which opens Lichess's token page
+  with the right permissions already checked (`board:play`,
+  `challenge:read`, `challenge:write`, `puzzle:read`). Copy the token it
+  gives you, then paste it into the form on `/login` on your dumbphone.
+  No redirect happens on the dumbphone at all with this method.
+
+Either way, once you're in, the KV-backed session cookie keeps you logged in
+for about a year (same lifetime as a Lichess access token).
 
 ## Playing
 
@@ -114,17 +156,30 @@ context, and explains why Bullet/Blitz are missing where relevant.
 - Every game page has a **Refresh board** link - since there's no
   JavaScript, nothing updates automatically; reload to see the opponent's
   move.
+- In the local vs-AI mode, moves may take a couple of seconds while the
+  remote engine "thinks" (up to ~8s at the higher difficulties before it
+  gives up and just moves randomly) - the page simply won't finish loading
+  until that resolves, since there's no way to show a spinner without JS.
 
 ## Known limitations / things worth testing after deploy
 
-I built and unit-tested the board rendering, puzzle-replay, and PKCE logic
-locally, but couldn't make live calls to `lichess.org` from the sandbox this
-was built in - so it's worth double-checking these against the real API
-once deployed, and opening an issue/adjusting `src/lichessApi.js` if any
-field name has drifted from what's documented at lichess.org/api:
+I built and unit-tested the board rendering, puzzle-replay, local AI game
+logic, and PKCE logic locally, but couldn't make live calls to
+`lichess.org` or `chess-api.com` from the sandbox this was built in - so
+it's worth double-checking these against the real APIs once deployed:
 
 - Exact JSON field names in `/api/account/playing`, `/api/challenge/ai`,
-  `/api/challenge/open`, and `/api/puzzle/*` responses
+  `/api/challenge/open`, and `/api/puzzle/*` responses (see
+  `src/lichessApi.js` if anything's drifted from lichess.org/api)
+- Exact response shape from `chess-api.com`'s `/v1` endpoint (see
+  `src/localAi.js`'s `fetchRemoteAiMove` if the AI seems to always be
+  falling back to random moves - that means the response parsing needs
+  adjusting, not that anything is broken)
+- Whether `https://lichess.org/account/oauth/token/create?scopes[]=...`
+  actually pre-checks the boxes as expected - if Lichess changes that
+  page's query-param handling, the link in `/login` will just open a blank
+  token form instead (still fully functional, just requires manually
+  checking "Play games with the board API" and the challenge/puzzle scopes)
 - Chess960 castling is entered as a normal king move (e.g. `e1g1`); some
   positions may need the "king takes own rook" square instead - not
   special-cased here
@@ -132,9 +187,10 @@ field name has drifted from what's documented at lichess.org/api:
   streaming client, not a click-and-wait phone page - it may occasionally
   report "no opponent found" even when one was actually found a moment
   after the 20s window closed. If that happens, refresh the home page.
-- The tap-to-move board submits moves via a GET link's querystring (the
-  only way to get a clickable action with zero JavaScript). Responses that
-  execute a move are sent with `Cache-Control: no-store` to discourage
-  Opera Mini's proxy or any CDN from caching/replaying them, but if your
-  phone's browser does something unusual with back-navigation on a played
-  move, that's the mechanism to look at first.
+- The tap-to-move board (both the Lichess-backed boards and the local AI
+  mode) submits moves via a GET link's querystring - the only way to get a
+  clickable action with zero JavaScript. Those responses are sent with
+  `Cache-Control: no-store` to discourage Opera Mini's proxy or any CDN
+  from caching/replaying them, but if your phone's browser does something
+  unusual with back-navigation on a played move, that's the mechanism to
+  look at first.

@@ -28,4 +28,18 @@ export function findTimeControl(value) {
   return TIME_CONTROLS.find((t) => t.value === value) || TIME_CONTROLS[0];
 }
 
+// AI level for real Lichess-hosted AI games (/game/new/ai), via the Board
+// API's /api/challenge/ai - this is Lichess's own Stockfish, levels 1-8.
 export const AI_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8];
+
+// Difficulty for the anonymous, no-login local AI mode (/ai) - a different
+// scale on purpose, since it's a different engine path (see src/localAi.js):
+// 0 plays uniformly-random legal moves, 1-4 call a remote engine at
+// increasing search depth (falling back to random if that call fails).
+export const LOCAL_AI_LEVELS = [
+  { value: 0, label: '0 - Random moves' },
+  { value: 1, label: '1 - Easy' },
+  { value: 2, label: '2 - Medium' },
+  { value: 3, label: '3 - Hard' },
+  { value: 4, label: '4 - Very hard' },
+];

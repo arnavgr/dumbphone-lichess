@@ -22,14 +22,16 @@ function nav(session) {
   if (!session) {
     return (
       '<p><a href="/">Home</a> | ' +
-      '<a href="/puzzle">Puzzle (no login needed)</a> | ' +
-      '<a href="/login">Login (optional, needed to play)</a></p><hr>'
+      '<a href="/puzzle">Puzzle (no login)</a> | ' +
+      '<a href="/ai">vs AI (no login)</a> | ' +
+      '<a href="/login">Login (for real multiplayer)</a></p><hr>'
     );
   }
   return (
     `<p>Logged in as <b>${escapeHtml(session.username)}</b><br>` +
     `<a href="/">Home</a> | ` +
-    `<a href="/game/new/ai">vs AI</a> | ` +
+    `<a href="/game/new/ai">vs AI (Lichess)</a> | ` +
+    `<a href="/ai">vs AI (local)</a> | ` +
     `<a href="/game/new/multiplayer">Multiplayer</a> | ` +
     `<a href="/puzzle">Puzzle</a> | ` +
     `<a href="/logout">Logout</a></p><hr>`
