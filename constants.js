@@ -33,7 +33,7 @@ export function findTimeControl(value) {
 export const AI_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 // Difficulty for the anonymous, no-login local AI mode (/ai) - a different
-// scale on purpose, since it's a different engine path (see src/localAi.js):
+// scale on purpose, since it's a different engine path (see src/chess.js):
 // 0 plays uniformly-random legal moves, 1-4 call a remote engine at
 // increasing search depth (falling back to random if that call fails).
 export const LOCAL_AI_LEVELS = [

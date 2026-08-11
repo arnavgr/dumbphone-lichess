@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { Chess } from 'chess.js';
-import { randomString, codeChallengeS256 } from './pkce.js';
 import {
+  randomString,
+  codeChallengeS256,
   getSession,
   createSession,
   destroySession,
@@ -9,11 +10,9 @@ import {
   consumeOAuthState,
   sessionCookie,
   clearedSessionCookie,
-} from './session.js';
-import * as lichess from './lichessApi.js';
-import { renderBoard, sideToMove } from './board.js';
-import { puzzleState, normalizeUci } from './puzzle.js';
-import { pickAiMove, applyAiMove } from './localAi.js';
+} from './lichess.js';
+import * as lichess from './lichess.js';
+import { renderBoard, sideToMove, puzzleState, normalizeUci, pickAiMove, applyAiMove } from './chess.js';
 import {
   page,
   redirectPage,
@@ -476,7 +475,7 @@ app.get('/challenge/:id', async (c) => {
 //
 // Fully independent of Lichess - no account, no token, no OAuth. Move
 // legality and game-over detection run through chess.js; the AI's replies
-// come from src/localAi.js. All state lives in the URL (the current FEN),
+// come from src/chess.js. All state lives in the URL (the current FEN),
 // so there's nothing to store server-side and nothing to expire.
 
 app.get('/ai', async (c) => {
