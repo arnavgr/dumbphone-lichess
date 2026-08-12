@@ -230,3 +230,7 @@ export const puzzleDaily = () => lget(null, '/api/puzzle/daily');
 export const puzzleDailyDay = (days) => lget(null, `/api/puzzle/daily/${days}`);
 export const puzzleNext = (token) => lget(token, '/api/puzzle/next');
 export const puzzleById = (token, id) => lget(token, `/api/puzzle/${id}`);
+// Stateless puzzle source: a fresh batch of puzzle IDs on every call, no
+// auth required. Unlike /api/puzzle/next, it does NOT pin the user to their
+// current puzzle-round, so this is what we use for "next puzzle".
+export const puzzleStreak = () => lget(null, '/api/puzzle/streak');

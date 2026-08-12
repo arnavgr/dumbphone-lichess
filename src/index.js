@@ -52,12 +52,17 @@ app.use('*', async (c, next) => {
 
 const session = (c) => c.get('session') || null;
 
-// Board size picked on /settings, stored in the "bsize" cookie (works
-// logged-out and persists across pages/visits).
 function boardSize(c) {
   const v = parseCookies(c)['bsize'];
   return BOARD_SIZE_KEYS.includes(v) ? v : 'normal';
 }
+
+// Cache-buster for "new puzzle" links: some proxy browsers (Opera Mini)
+// cache GET pages by URL even with no-store headers, which would pin the
+// /puzzle redirect to one puzzle forever. A unique query param per render
+// guarantees the request always reaches the Worker.
+const newPuzzleHref = () =>
+  `/puzzle?r=${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
 
 function timeControlParams(tc) {
   const params = {};
@@ -129,10 +134,10 @@ app.get('/', async (c) => {
   if (!s) {
     const body = `
 <p>Play Lichess chess on a basic phone browser - no smartphone needed.</p>
-<p><a href="/puzzle">&gt;&gt; Solve a puzzle (no login needed)</a></p>
+<p><a href="${newPuzzleHref()}">&gt;&gt; Solve a puzzle (no login needed)</a></p>
 <p><a href="/ai">&gt;&gt; Play vs a computer (no login needed)</a></p>
 <p><a href="/login">&gt;&gt; Login with Lichess to play other people</a></p>
-<p style="font-size:12px;">Note: without login, Lichess only serves one puzzle per day. Log in for unlimited puzzles and multiplayer.</p>`;
+<p style="font-size:12px;">Puzzles and the local computer opponent work without login. Logging in adds rated multiplayer against real people and your ratings.</p>`;
     return htmlResponse(page('Lichess Dumbphone', body, s));
   }
 
@@ -179,7 +184,7 @@ app.get('/', async (c) => {
   body += '<p><a href="/game/new/multiplayer">&gt;&gt; Play multiplayer</a></p>';
   body += '<p><a href="/game/new/ai">&gt;&gt; Play vs AI (Lichess)</a></p>';
   body += '<p><a href="/ai">&gt;&gt; Play vs AI (no login)</a></p>';
-  body += '<p><a href="/puzzle">&gt;&gt; Solve a puzzle</a></p>';
+  body += `<p><a href="${newPuzzleHref()}">&gt;&gt; Solve a puzzle</a></p>`;
   return htmlResponse(page('Lichess Dumbphone', body, s, { refreshSeconds: incoming.length ? 30 : undefined }));
 });
 
@@ -253,7 +258,6 @@ app.get('/callback', async (c) => {
     });
     const account = await lichess.getAccount(tokenData.access_token);
     const sid = await createSession(c, { accessToken: tokenData.access_token, username: account.username });
-    // Set-Cookie goes INTO htmlResponse so it actually ships on the Response.
     return htmlResponse(redirectPage('/', `Logged in as ${account.username}.`), 200, {
       'Set-Cookie': sessionCookie(sid),
     });
@@ -353,9 +357,6 @@ app.get('/game/new/multiplayer', async (c) => {
   return htmlResponse(page('Play multiplayer', body, s));
 });
 
-// Quick pair: don't hold the phone's request open. Snapshot existing games,
-// run the seek in the background, send the phone to an auto-refreshing
-// /searching page. A "new" game = one not in the snapshot.
 app.post('/game/new/multiplayer/quick', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
@@ -664,8 +665,6 @@ app.get('/game/:id', async (c) => {
   if (error) body += `<p>${escapeHtml(error)}</p>`;
 
   if (game) {
-    // Ratings: opponent's comes with the game; ours needs /api/account keyed
-    // by the game's perf/speed (e.g. "rapid"/"classical").
     let myRatingStr = '';
     try {
       const account = await lichess.getAccount(s.accessToken);
@@ -766,28 +765,42 @@ app.post('/game/:id/resign', async (c) => {
 });
 
 // ---------------------------------------------------------------- Puzzles
+//
+// IMPORTANT: we deliberately do NOT use /api/puzzle/next. It is tied to
+// Lichess's per-user puzzle session: it keeps returning the SAME puzzle
+// until a round result is recorded on their servers - which this site never
+// does, because puzzle moves are checked locally. That's exactly the
+// "same puzzle forever" bug.
+//
+// Instead we use /api/puzzle/streak: stateless, no auth needed, and every
+// call returns a fresh batch of puzzle IDs (ramping up in difficulty). We
+// keep the batch in the "pzk" cookie and hand out one puzzle per visit,
+// fetching a new batch when it runs out. The "?r=" cache-buster on all
+// "new puzzle" links stops proxy browsers from pinning the redirect.
 app.get('/puzzle', async (c) => {
   const s = session(c);
   try {
-    let data;
-    let extraHeaders = {};
-    if (s) {
-      // Logged in: Lichess serves a fresh puzzle every call.
-      data = await lichess.puzzleNext(s.accessToken);
+    const cookies = parseCookies(c);
+    let queue = (cookies['pzk'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+    let id;
+    if (queue.length > 0) {
+      id = queue.shift();
     } else {
-      // Anonymous: Lichess only exposes daily puzzles. Rotate the last few
-      // days' daily puzzles so "New puzzle" varies. (If the day-offset
-      // endpoint is unavailable, fall back to today's daily.)
-      const cookies = parseCookies(c);
-      const offset = Math.abs(parseInt(cookies['pzday'], 10) || 0) % 6;
-      extraHeaders = { 'Set-Cookie': `pzday=${(offset + 1) % 6}; Path=/; Max-Age=31536000` };
+      let data;
       try {
-        data = await lichess.puzzleDailyDay(offset);
+        data = await lichess.puzzleStreak();
       } catch {
-        data = await lichess.puzzleDaily();
+        data = s ? await lichess.puzzleNext(s.accessToken) : await lichess.puzzleDaily();
       }
+      id = data.puzzle.id;
+      queue = String(data.streak || '')
+        .split(/\s+/)
+        .filter((x) => x && x !== id);
     }
-    const id = data.puzzle.id;
+    if (!id) throw new Error('Lichess did not return a puzzle.');
+    const extraHeaders = {
+      'Set-Cookie': queue.length > 0 ? `pzk=${queue.join(',')}; Path=/; Max-Age=86400` : 'pzk=; Path=/; Max-Age=0',
+    };
     return htmlResponse(redirectPage(`/puzzle/${id}?step=0`, 'Loading puzzle...'), 200, extraHeaders);
   } catch (e) {
     return htmlResponse(errorPage('Could not load puzzle', e.message, '/'), 500);
@@ -805,7 +818,7 @@ app.get('/puzzle/:id', async (c) => {
   try {
     puzzle = await lichess.puzzleById(s ? s.accessToken : null, id);
   } catch (e) {
-    return htmlResponse(errorPage('Could not load puzzle', e.message, '/puzzle'));
+    return htmlResponse(errorPage('Could not load puzzle', e.message, newPuzzleHref()));
   }
 
   let base;
@@ -814,14 +827,14 @@ app.get('/puzzle/:id', async (c) => {
     base = puzzleBasePosition(puzzle);
     solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci);
   } catch (e) {
-    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle'), 500);
+    return htmlResponse(errorPage('Puzzle setup error', e.message, newPuzzleHref()), 500);
   }
   const solverColor = sideToMove(base.fen);
   let state;
   try {
     state = puzzleStateFrom(base.fen, solution, step);
   } catch (e) {
-    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle'), 500);
+    return htmlResponse(errorPage('Puzzle setup error', e.message, newPuzzleHref()), 500);
   }
 
   const moveRaw = c.req.query('move');
@@ -849,7 +862,7 @@ app.get('/puzzle/:id', async (c) => {
     body += renderBoard(state.fen, solverColor, { size });
     body += `<p>Puzzle rating: ${escapeHtml(puzzle.puzzle.rating)}</p>`;
     body += '<p><b>Puzzle solved!</b></p>';
-    body += '<p><a href="/puzzle">&gt;&gt; Next puzzle</a></p>';
+    body += `<p><a href="${newPuzzleHref()}">&gt;&gt; Next puzzle</a></p>`;
   } else {
     body += renderBoard(state.fen, solverColor, {
       size,
@@ -868,7 +881,7 @@ app.get('/puzzle/:id', async (c) => {
 <p style="font-size:12px;">Or type a move: <input type="text" name="move" size="8" maxlength="6"> <input type="submit" value="Submit"></p>
 </form>`;
   }
-  body += `<p><a href="/puzzle/${pid}?step=${state.step}">Refresh</a> | <a href="/puzzle">New puzzle</a></p>`;
+  body += `<p><a href="/puzzle/${pid}?step=${state.step}">Refresh</a> | <a href="${newPuzzleHref()}">New puzzle</a></p>`;
   return htmlResponse(page('Puzzle', body, s));
 });
 
@@ -882,14 +895,14 @@ app.post('/puzzle/:id', async (c) => {
   try {
     puzzle = await lichess.puzzleById(s ? s.accessToken : null, id);
   } catch (e) {
-    return htmlResponse(errorPage('Could not load puzzle', e.message, '/puzzle'));
+    return htmlResponse(errorPage('Could not load puzzle', e.message, newPuzzleHref()));
   }
   let solution;
   try {
     puzzleBasePosition(puzzle);
     solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci);
   } catch (e) {
-    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle'), 500);
+    return htmlResponse(errorPage('Puzzle setup error', e.message, newPuzzleHref()), 500);
   }
   if (!guess) return htmlResponse(redirectPage(`/puzzle/${id}?step=${step}`, 'No move entered.'));
   const result = checkPuzzleGuess(solution, step, guess);
