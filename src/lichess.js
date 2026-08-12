@@ -1,14 +1,4 @@
-// ---------------------------------------------------------------------------
-// Everything that talks to Lichess, or supports talking to Lichess:
-//   - PKCE helpers for the OAuth2 login flow
-//   - KV-backed session + OAuth-state storage
-//   - The lichess.org HTTP API wrapper (Board API, challenges, puzzles...)
-// ---------------------------------------------------------------------------
-
-// ============================================================================
-// PKCE (RFC 7636) helpers used for the Lichess OAuth2 login flow.
-// Lichess is a "public client" - no client secret, PKCE with S256 is mandatory.
-// ============================================================================
+// PKCE helpers, KV-backed sessions, and the lichess.org API wrapper.
 
 function base64url(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -17,26 +7,20 @@ function base64url(buffer) {
   return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// Random URL-safe string, used for both the PKCE code_verifier and the OAuth "state" param.
 export function randomString(byteLength = 48) {
   const bytes = new Uint8Array(byteLength);
   crypto.getRandomValues(bytes);
   return base64url(bytes.buffer);
 }
 
-// S256 code_challenge derived from a code_verifier.
 export async function codeChallengeS256(verifier) {
   const data = new TextEncoder().encode(verifier);
   const digest = await crypto.subtle.digest('SHA-256', data);
   return base64url(digest);
 }
 
-// ============================================================================
-// Session + OAuth-state storage (Cloudflare KV, via the `KV` binding)
-// ============================================================================
-
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 350; // ~ lifetime of a Lichess access token
-const OAUTH_STATE_TTL_SECONDS = 600; // 10 minutes to complete the login round trip
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 350;
+const OAUTH_STATE_TTL_SECONDS = 600;
 
 export function parseCookies(c) {
   const header = c.req.header('Cookie') || '';
@@ -59,7 +43,6 @@ export function clearedSessionCookie() {
   return 'sid=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0';
 }
 
-// Returns { id, accessToken, username } or null if not logged in.
 export async function getSession(c) {
   const cookies = parseCookies(c);
   const sid = cookies['sid'];
@@ -67,8 +50,7 @@ export async function getSession(c) {
   const raw = await c.env.KV.get(`session:${sid}`);
   if (!raw) return null;
   try {
-    const data = JSON.parse(raw);
-    return { id: sid, ...data };
+    return { id: sid, ...JSON.parse(raw) };
   } catch {
     return null;
   }
@@ -86,7 +68,6 @@ export async function destroySession(c, sid) {
   if (sid) await c.env.KV.delete(`session:${sid}`);
 }
 
-// --- OAuth state (short lived, holds the PKCE code_verifier between /login and /callback) ---
 export async function saveOAuthState(c, state, verifier) {
   await c.env.KV.put(`oauth:${state}`, verifier, { expirationTtl: OAUTH_STATE_TTL_SECONDS });
 }
@@ -97,12 +78,6 @@ export async function consumeOAuthState(c, state) {
   if (verifier) await c.env.KV.delete(key);
   return verifier;
 }
-
-// ============================================================================
-// Thin wrapper around the Lichess HTTP API (https://lichess.org/api).
-// Every function returns parsed JSON on success and throws a LichessError on
-// failure, so callers can show the real error message from Lichess.
-// ============================================================================
 
 const BASE = 'https://lichess.org';
 
@@ -149,10 +124,7 @@ export async function lpost(token, path, params) {
   }
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      ...authHeaders(token),
-    },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeaders(token) },
     body,
   });
   return handle(res);
@@ -163,7 +135,6 @@ export async function lpostEmpty(token, path) {
   return handle(res);
 }
 
-// --- OAuth token exchange (Authorization Code + PKCE) ---
 export async function exchangeCodeForToken({ code, verifier, redirectUri, clientId }) {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
@@ -177,26 +148,22 @@ export async function exchangeCodeForToken({ code, verifier, redirectUri, client
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
-  return handle(res); // { token_type, access_token, expires_in }
+  return handle(res);
 }
 
-// --- Account ---
+// Account / games
 export const getAccount = (token) => lget(token, '/api/account');
 export const getPlaying = (token) => lget(token, '/api/account/playing');
-
-// --- Games ---
 export const gameExport = (gameId) => lget(null, `/game/export/${gameId}?pgnInJson=true`);
 
-// --- Board API (human play) ---
+// Board API
 export const boardMove = (token, gameId, move) =>
   lpostEmpty(token, `/api/board/game/${gameId}/move/${encodeURIComponent(move)}`);
 export const boardResign = (token, gameId) =>
   lpostEmpty(token, `/api/board/game/${gameId}/resign`);
-export const boardAbort = (token, gameId) => lpostEmpty(token, `/api/board/game/${gameId}/abort`);
 
-// Board API "seek" (join the real-time matchmaking pool). Holds the HTTP
-// connection open until matched or timeout. We watch the stream for the
-// {"game":{...}} event so we can bail out early when a match is found.
+// Join the matchmaking pool. Holds the connection until matched or timeout;
+// watches the stream for the {"game":{...}} event so we can return early.
 export async function quickPairSeek(token, params, timeoutMs = 20000) {
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -207,10 +174,7 @@ export async function quickPairSeek(token, params, timeoutMs = 20000) {
   try {
     const res = await fetch(`${BASE}/api/board/seek`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        ...authHeaders(token),
-      },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeaders(token) },
       body,
       signal: controller.signal,
     });
@@ -228,12 +192,11 @@ export async function quickPairSeek(token, params, timeoutMs = 20000) {
           const { done, value } = await reader.read();
           if (done) break;
           buf += decoder.decode(value, { stream: true });
-          // The match event looks like: {"game":{"id":"..."}}
           if (/"game"\s*:/.test(buf)) return { matched: true };
           if (buf.length > 4096) buf = buf.slice(-512);
         }
       } catch {
-        // reader threw because we aborted -> treat as timeout below
+        // aborted -> timeout below
       }
     }
     return { matched: true };
@@ -245,7 +208,7 @@ export async function quickPairSeek(token, params, timeoutMs = 20000) {
   }
 }
 
-// --- Challenges ---
+// Challenges
 export const challengeAI = (token, params) => lpost(token, '/api/challenge/ai', params);
 export const challengeOpen = (token, params) => lpost(token, '/api/challenge/open', params);
 export const challengeUser = (token, username, params) =>
@@ -260,10 +223,10 @@ export const challengeDecline = (token, challengeId) =>
 export const challengeCancel = (token, challengeId) =>
   lpostEmpty(token, `/api/challenge/${challengeId}/cancel`);
 
-// --- Puzzles ---
+// Puzzles
 export const puzzleDaily = () => lget(null, '/api/puzzle/daily');
-// Daily puzzle of `days` ago (0 = today). Not available on every Lichess
-// deployment forever, so callers MUST fall back to puzzleDaily() on error.
+// Daily puzzle of `days` ago (0 = today). Not guaranteed to exist forever, so
+// callers MUST fall back to puzzleDaily() on error.
 export const puzzleDailyDay = (days) => lget(null, `/api/puzzle/daily/${days}`);
 export const puzzleNext = (token) => lget(token, '/api/puzzle/next');
 export const puzzleById = (token, id) => lget(token, `/api/puzzle/${id}`);

@@ -1,30 +1,30 @@
-// ---------------------------------------------------------------------------
-// All chess.js-dependent logic: board rendering, puzzle logic, local AI.
-// chess.js runs on the Worker only - the phone just gets rendered HTML.
-// ---------------------------------------------------------------------------
 import { Chess } from 'chess.js';
 
-// ============================================================================
-// Board rendering
-// ============================================================================
+// Board sizes. Widths include coordinate labels + 4px border:
+//   tiny ~116px (fits 128px-wide screens), small ~156px,
+//   normal ~220px (fits 240x320, default), large ~274px (fits 320px+).
+export const BOARD_SIZES = {
+  tiny: { cell: 14, img: 12, coord: 0 },
+  small: { cell: 17, img: 14, coord: 8 },
+  normal: { cell: 24, img: 20, coord: 12 },
+  large: { cell: 30, img: 26, coord: 15 },
+};
+export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal', 'large'];
+export function boardSizeSpec(name) {
+  return BOARD_SIZES[name] || BOARD_SIZES.normal;
+}
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-
 const PIECE_FILES = {
   K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
   k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP',
 };
 
-const CELL = 24;
-const IMG = 20;
-
-function pieceImg(code) {
+function pieceImg(code, img) {
   const f = PIECE_FILES[code];
   if (!f) return '';
-  return `<img src="/images/${f}.png" width="${IMG}" height="${IMG}" alt="${code}" style="display:block;margin:auto;border:0;">`;
+  return `<img src="/images/${f}.png" width="${img}" height="${img}" alt="${code}" style="display:block;margin:auto;border:0;">`;
 }
-
-const SPACER = `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
 
 export function fenToPieceMap(fen) {
   const placement = fen.split(' ')[0];
@@ -61,27 +61,32 @@ function legalMovesFrom(fen, square) {
   }
 }
 
+// opts: size, interactive, selected, selectHref(sq), moveHref(uci), isOwnPiece(sq,piece)
 export function renderBoard(fen, orientation = 'white', opts = {}) {
   const { interactive = false, selected = null, selectHref, moveHref, isOwnPiece } = opts;
+  const spec = boardSizeSpec(opts.size);
+  const CELL = spec.cell;
+  const IMG = spec.img;
+  const COORD = spec.coord;
+  const showCoords = COORD > 0;
   const pieceMap = fenToPieceMap(fen);
   const movesFromSelected = interactive && selected ? legalMovesFrom(fen, selected) : {};
   const ranksTopDown = orientation === 'black' ? [1, 2, 3, 4, 5, 6, 7, 8] : [8, 7, 6, 5, 4, 3, 2, 1];
   const filesOrder = orientation === 'black' ? [...FILES].reverse() : FILES;
-  const coordStyle = 'background:#ccc;font-size:9px;text-align:center;vertical-align:middle;';
+  const coordStyle = `background:#ccc;font-size:${Math.max(7, COORD - 2)}px;text-align:center;vertical-align:middle;`;
 
   const fileRow = () => {
-    let row = `<tr><td style="${coordStyle}width:${CELL / 2}px;height:${CELL / 2}px;"></td>`;
-    for (const file of filesOrder) {
-      row += `<td style="${coordStyle}width:${CELL}px;height:${CELL / 2}px;">${file}</td>`;
-    }
-    row += `<td style="${coordStyle}width:${CELL / 2}px;height:${CELL / 2}px;"></td></tr>`;
+    if (!showCoords) return '';
+    let row = `<tr><td style="${coordStyle}width:${COORD}px;height:${COORD}px;"></td>`;
+    for (const file of filesOrder) row += `<td style="${coordStyle}width:${CELL}px;height:${COORD}px;">${file}</td>`;
+    row += `<td style="${coordStyle}width:${COORD}px;height:${COORD}px;"></td></tr>`;
     return row;
   };
 
   let html = '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:4px auto;border:2px solid #333;">';
   html += fileRow();
   for (const rank of ranksTopDown) {
-    html += `<tr><td style="${coordStyle}width:${CELL / 2}px;">${rank}</td>`;
+    html += showCoords ? `<tr><td style="${coordStyle}width:${COORD}px;">${rank}</td>` : '<tr>';
     for (const file of filesOrder) {
       const square = `${file}${rank}`;
       const fileIdx = FILES.indexOf(file);
@@ -91,19 +96,19 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
       const uci = movesFromSelected[square];
       if (selected === square) bg = '#ffed4a';
       else if (uci) bg = '#7bde7b';
-      let inner = piece ? pieceImg(piece) : SPACER;
+      let inner = piece ? pieceImg(piece, IMG) : `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
       if (uci && moveHref) {
-        // Solid colors only - rgba/border-radius can be missing on old browsers.
+        const dot = Math.max(4, Math.floor(IMG / 2));
         const targetContent = piece
-          ? pieceImg(piece)
-          : `<div style="width:${IMG / 2}px;height:${IMG / 2}px;background:#333;margin:auto;"></div>`;
+          ? pieceImg(piece, IMG)
+          : `<div style="width:${dot}px;height:${dot}px;background:#333;margin:auto;"></div>`;
         inner = `<a href="${moveHref(uci)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${targetContent}</a>`;
       } else if (interactive && piece && typeof isOwnPiece === 'function' && isOwnPiece(square, piece) && selectHref) {
-        inner = `<a href="${selectHref(square)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${pieceImg(piece)}</a>`;
+        inner = `<a href="${selectHref(square)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${pieceImg(piece, IMG)}</a>`;
       }
       html += `<td width="${CELL}" height="${CELL}" style="width:${CELL}px;height:${CELL}px;min-width:${CELL}px;min-height:${CELL}px;padding:0;text-align:center;vertical-align:middle;background-color:${bg};border:1px solid #666;">${inner}</td>`;
     }
-    html += `<td style="${coordStyle}width:${CELL / 2}px;">${rank}</td></tr>`;
+    html += showCoords ? `<td style="${coordStyle}width:${COORD}px;">${rank}</td></tr>` : '</tr>';
   }
   html += fileRow();
   html += '</table>';
@@ -114,32 +119,12 @@ export function sideToMove(fen) {
   return fen.split(' ')[1] === 'w' ? 'white' : 'black';
 }
 
-// ============================================================================
-// Puzzle logic
-//
-// Lichess puzzle payload: full game PGN + initialPly + solution (UCI array).
-// The solver-to-move position is the game position at some ply, from which
-// solution[0] must be legal. Previously we blindly replayed `initialPly`
-// moves - if that replay produced nothing (chess.js version quirk, PGN
-// parse issue, missing initialPly...), EVERY puzzle rendered the starting
-// position and EVERY guess was wrong. That's exactly the reported bug.
-//
-// So now: puzzleBasePosition() VALIDATES the derived position by checking
-// that solution[0] (and solution[1]) are legal from it, and if not, it
-// searches nearby plies for the one that fits. If nothing fits, it throws
-// with full diagnostics so the error page tells us exactly why.
-// ============================================================================
-
+// ---- Puzzle logic (self-healing: validates the derived position and, if it
+// doesn't fit the solution, searches nearby plies) ----
 export function normalizeUci(move) {
-  return String(move || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-h1-8qrbn]/g, '');
+  return String(move || '').trim().toLowerCase().replace(/[^a-h1-8qrbn]/g, '');
 }
 
-// Parse the puzzle game's PGN into verbose moves. Primary path is
-// chess.js's own loadPgn; the fallback is a crude tokenizer + replay, so a
-// loadPgn failure mode can't silently leave us with zero moves.
 function pgnToVerboseMoves(pgn) {
   const text = String(pgn || '');
   try {
@@ -148,13 +133,13 @@ function pgnToVerboseMoves(pgn) {
     const hist = tmp.history({ verbose: true });
     if (hist.length) return hist;
   } catch {
-    // fall through to the manual parser
+    // fall through to manual parser
   }
   const tokens = text
-    .replace(/\{[^}]*\}/g, ' ') // { comments }
-    .replace(/\$\d+/g, ' ') // NAGs
-    .replace(/\d+\.{1,3}/g, ' ') // move numbers: "1." "12..."
-    .replace(/1-0|0-1|1\/2-1\/2|\*/g, ' ') // result markers
+    .replace(/\{[^}]*\}/g, ' ')
+    .replace(/\$\d+/g, ' ')
+    .replace(/\d+\.{1,3}/g, ' ')
+    .replace(/1-0|0-1|1\/2-1\/2|\*/g, ' ')
     .split(/\s+/)
     .filter((t) => t && !/^\.\.?$/.test(t));
   const tmp = new Chess();
@@ -162,7 +147,7 @@ function pgnToVerboseMoves(pgn) {
   for (const t of tokens) {
     try {
       const m = tmp.move(t);
-      if (!m) break; // chess.js 0.x-style null
+      if (!m) break;
       out.push(m);
     } catch {
       break;
@@ -171,32 +156,21 @@ function pgnToVerboseMoves(pgn) {
   return out;
 }
 
-// Computes the solver-to-move position for a puzzle.
-// Returns { fen, plyUsed, totalPlies, healed }. Throws with a diagnostic
-// message if no position fits the solution (that message is shown to the
-// user - send it back if you ever see it).
 export function puzzleBasePosition(puzzle) {
   const solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci).filter(Boolean);
   if (!solution.length) throw new Error('Puzzle payload has no solution moves.');
-
   const pgn = puzzle.game && puzzle.game.pgn;
   const moves = pgnToVerboseMoves(pgn);
   if (!moves.length) {
     const p = String(pgn || '');
-    throw new Error(
-      `Could not parse any moves from the puzzle PGN (length ${p.length}, preview: "${p.slice(0, 60)}").`
-    );
+    throw new Error(`Could not parse any moves from the puzzle PGN (length ${p.length}, preview: "${p.slice(0, 60)}").`);
   }
-
-  // FEN after every ply: fens[p] = position with p half-moves played.
   const replay = new Chess();
   const fens = [replay.fen()];
   for (const m of moves) {
     replay.move({ from: m.from, to: m.to, promotion: m.promotion });
     fens.push(replay.fen());
   }
-
-  // True if solution[0] (and solution[1] if present) can be played from fens[ply].
   const fits = (ply) => {
     if (!Number.isFinite(ply) || ply < 0 || ply >= fens.length) return false;
     try {
@@ -212,27 +186,13 @@ export function puzzleBasePosition(puzzle) {
       return false;
     }
   };
-
   const claimed = Number(puzzle.puzzle.initialPly);
-
-  // 1) Trust initialPly when it checks out.
-  if (fits(claimed)) {
-    return { fen: fens[claimed], plyUsed: claimed, totalPlies: moves.length, healed: false };
-  }
-
-  // 2) Self-heal: nearest ply where the solution fits.
+  if (fits(claimed)) return { fen: fens[claimed], plyUsed: claimed };
   for (let d = 1; d <= moves.length + 1; d++) {
-    if (fits(claimed + d)) {
-      return { fen: fens[claimed + d], plyUsed: claimed + d, totalPlies: moves.length, healed: true };
-    }
-    if (fits(claimed - d)) {
-      return { fen: fens[claimed - d], plyUsed: claimed - d, totalPlies: moves.length, healed: true };
-    }
-    if (!Number.isFinite(claimed) && fits(d)) {
-      return { fen: fens[d], plyUsed: d, totalPlies: moves.length, healed: true };
-    }
+    if (fits(claimed + d)) return { fen: fens[claimed + d], plyUsed: claimed + d };
+    if (fits(claimed - d)) return { fen: fens[claimed - d], plyUsed: claimed - d };
+    if (!Number.isFinite(claimed) && fits(d)) return { fen: fens[d], plyUsed: d };
   }
-
   throw new Error(
     `Could not locate the puzzle position: initialPly=${JSON.stringify(puzzle.puzzle.initialPly)}, ` +
       `parsed ${moves.length} plies, first solution move ${solution[0]}.`
@@ -243,31 +203,18 @@ export function applyUciMoves(baseFen, uciMoves) {
   const chess = new Chess(baseFen);
   for (const m of uciMoves) {
     if (!m) continue;
-    chess.move({
-      from: m.slice(0, 2),
-      to: m.slice(2, 4),
-      promotion: m.length > 4 ? m.slice(4, 5) : undefined,
-    });
+    chess.move({ from: m.slice(0, 2), to: m.slice(2, 4), promotion: m.length > 4 ? m.slice(4, 5) : undefined });
   }
   return chess.fen();
 }
 
-// Board/state after applying `step` solution moves on top of the base FEN.
 export function puzzleStateFrom(baseFen, solution, step) {
   const clampedStep = Math.max(0, Math.min(step, solution.length));
   const fen = applyUciMoves(baseFen, solution.slice(0, clampedStep));
-  return {
-    fen,
-    solved: clampedStep >= solution.length,
-    step: clampedStep,
-    solutionLength: solution.length,
-  };
+  return { fen, solved: clampedStep >= solution.length, step: clampedStep, solutionLength: solution.length };
 }
 
-// ============================================================================
-// Local AI opponent (anonymous "vs AI" mode)
-// ============================================================================
-
+// ---- Local AI opponent (anonymous mode) ----
 const REMOTE_DEPTH = { 1: 2, 2: 5, 3: 10, 4: 18 };
 const REMOTE_TIMEOUT_MS = 8000;
 
@@ -298,7 +245,7 @@ async function fetchRemoteAiMove(fen, depth) {
       };
     }
   } catch {
-    // fall through to a random move
+    // fall through to random
   } finally {
     clearTimeout(timer);
   }
@@ -323,7 +270,7 @@ export function applyAiMove(chess, move) {
       try {
         chess.move(fallback);
       } catch {
-        // leave position as-is
+        // leave as-is
       }
     }
   }

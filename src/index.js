@@ -52,8 +52,8 @@ app.use('*', async (c, next) => {
 
 const session = (c) => c.get('session') || null;
 
-// Board size picked on /settings, stored in the "bsize" cookie so it works
-// logged-out and persists across pages/visits on the phone.
+// Board size picked on /settings, stored in the "bsize" cookie (works
+// logged-out and persists across pages/visits).
 function boardSize(c) {
   const v = parseCookies(c)['bsize'];
   return BOARD_SIZE_KEYS.includes(v) ? v : 'normal';
@@ -78,7 +78,7 @@ function checkPuzzleGuess(solution, step, guess) {
   const g = normalizeUci(guess);
   if (g && expected && g === expected) {
     let newStep = step + 1;
-    if (solution[newStep]) newStep += 1; // auto-play opponent's forced reply
+    if (solution[newStep]) newStep += 1; // auto-play the opponent's forced reply
     return { correct: true, newStep };
   }
   const wrongPromotion =
@@ -90,17 +90,11 @@ function describeChallenge(ch) {
   const tc = ch.timeControl || {};
   let speed = '';
   if (tc.type === 'clock') speed = `${Math.round((tc.limit || 0) / 60)}+${tc.increment || 0}`;
-  else if (tc.type === 'correspondence') speed = `${tc.daysPerTurn || '?'} days/move`;
   else speed = tc.type || '';
-  const variant =
-    ch.variant && (ch.variant.key || ch.variant) !== 'standard'
-      ? ` ${ch.variant.name || ch.variant.key || ch.variant}`
-      : '';
-  return `${ch.rated ? 'Rated' : 'Casual'} ${speed}${variant}`.trim();
+  return `${ch.rated ? 'Rated' : 'Casual'} ${speed}`.trim();
 }
 
 // ---------------------------------------------------------------- Settings
-
 const SIZE_HINTS = {
   tiny: 'very small screens (128x160)',
   small: 'small screens (~160px wide)',
@@ -116,7 +110,7 @@ app.get('/settings', async (c) => {
     extraHeaders = { 'Set-Cookie': `bsize=${requested}; Path=/; Max-Age=31536000` };
   }
   const current = requested && BOARD_SIZE_KEYS.includes(requested) ? requested : boardSize(c);
-  let body = '<p>Pick a board size for your screen. The choice is saved on this phone.</p>';
+  let body = '<p>Pick a board size for your screen. Saved on this phone.</p>';
   for (const k of BOARD_SIZE_KEYS) {
     const active = k === current;
     body += `<p><b>${k}</b> - ${SIZE_HINTS[k]} `;
@@ -130,7 +124,6 @@ app.get('/settings', async (c) => {
 });
 
 // ---------------------------------------------------------------- Home
-
 app.get('/', async (c) => {
   const s = session(c);
   if (!s) {
@@ -138,7 +131,8 @@ app.get('/', async (c) => {
 <p>Play Lichess chess on a basic phone browser - no smartphone needed.</p>
 <p><a href="/puzzle">&gt;&gt; Solve a puzzle (no login needed)</a></p>
 <p><a href="/ai">&gt;&gt; Play vs a computer (no login needed)</a></p>
-<p><a href="/login">&gt;&gt; Login with Lichess to play other people</a></p>`;
+<p><a href="/login">&gt;&gt; Login with Lichess to play other people</a></p>
+<p style="font-size:12px;">Note: without login, Lichess only serves one puzzle per day. Log in for unlimited puzzles and multiplayer.</p>`;
     return htmlResponse(page('Lichess Dumbphone', body, s));
   }
 
@@ -146,14 +140,12 @@ app.get('/', async (c) => {
   let incoming = [];
   let loadError = null;
   try {
-    const data = await lichess.getPlaying(s.accessToken);
-    nowPlaying = data.nowPlaying || [];
+    nowPlaying = (await lichess.getPlaying(s.accessToken)).nowPlaying || [];
   } catch (e) {
     loadError = e.message;
   }
   try {
-    const ch = await lichess.challengeList(s.accessToken);
-    incoming = ch.in || [];
+    incoming = (await lichess.challengeList(s.accessToken)).in || [];
   } catch {
     // non-fatal
   }
@@ -166,12 +158,8 @@ app.get('/', async (c) => {
     for (const ch of incoming) {
       const from = (ch.challenger && (ch.challenger.name || ch.challenger.username)) || 'Someone';
       body += `<p><b>${escapeHtml(from)}</b> challenges you - ${escapeHtml(describeChallenge(ch))}</p>`;
-      body +=
-        `<form method="post" action="/challenge/${escapeHtml(ch.id)}/accept" style="display:inline;margin:0;">` +
-        '<input type="submit" value="Accept"></form> ';
-      body +=
-        `<form method="post" action="/challenge/${escapeHtml(ch.id)}/decline" style="display:inline;margin:0;">` +
-        '<input type="submit" value="Decline"></form>';
+      body += `<form method="post" action="/challenge/${escapeHtml(ch.id)}/accept" style="display:inline;margin:0;"><input type="submit" value="Accept"></form> `;
+      body += `<form method="post" action="/challenge/${escapeHtml(ch.id)}/decline" style="display:inline;margin:0;"><input type="submit" value="Decline"></form>`;
     }
     body += '<hr>';
   }
@@ -196,7 +184,6 @@ app.get('/', async (c) => {
 });
 
 // ---------------------------------------------------------------- Auth
-
 function tokenCreateUrl() {
   const url = new URL('https://lichess.org/account/oauth/token/create');
   for (const scope of LICHESS_SCOPES) url.searchParams.append('scopes[]', scope);
@@ -208,15 +195,10 @@ app.get('/login', async (c) => {
   const s = session(c);
   const configured = c.env.LICHESS_CLIENT_ID && c.env.REDIRECT_URI;
   let body = '<h4 style="margin:8px 0 4px;">Option A - Login via Lichess</h4>';
-  body +=
-    "<p>Redirects to lichess.org to sign in there. If lichess.org's own pages don't render well on your phone, use Option B below instead.</p>";
   body += configured
     ? '<p><a href="/login/oauth">&gt;&gt; Continue to Lichess</a></p>'
-    : "<p>Not available right now: LICHESS_CLIENT_ID / REDIRECT_URI aren't set in wrangler.toml.</p>";
-  body += '<hr>';
-  body += '<h4 style="margin:8px 0 4px;">Option B - Paste a personal API token</h4>';
-  body +=
-    '<p>Works entirely on this page, no redirect. Create a token once on any browser - even one that is not this phone - then paste it below.</p>';
+    : "<p>Not available: LICHESS_CLIENT_ID / REDIRECT_URI aren't set in wrangler.toml.</p>";
+  body += '<hr><h4 style="margin:8px 0 4px;">Option B - Paste a personal API token</h4>';
   body += `<p><a href="${escapeHtml(tokenCreateUrl())}">&gt;&gt; Create a token on lichess.org</a> (opens with the right permissions already checked)</p>`;
   body += `
 <form method="post" action="/login/token">
@@ -230,10 +212,7 @@ app.get('/login/oauth', async (c) => {
   const clientId = c.env.LICHESS_CLIENT_ID;
   const redirectUri = c.env.REDIRECT_URI;
   if (!clientId || !redirectUri) {
-    return htmlResponse(
-      errorPage('Not configured', 'LICHESS_CLIENT_ID and REDIRECT_URI must be set as vars in wrangler.toml.'),
-      500
-    );
+    return htmlResponse(errorPage('Not configured', 'LICHESS_CLIENT_ID and REDIRECT_URI must be set in wrangler.toml.'), 500);
   }
   const verifier = randomString(48);
   const state = randomString(24);
@@ -255,8 +234,7 @@ app.get('/callback', async (c) => {
   const state = c.req.query('state');
   const errorParam = c.req.query('error');
   if (errorParam) return htmlResponse(errorPage('Login cancelled', `Lichess said: ${errorParam}`, '/login'));
-  if (!code || !state)
-    return htmlResponse(errorPage('Login failed', 'Missing code or state from Lichess.', '/login'), 400);
+  if (!code || !state) return htmlResponse(errorPage('Login failed', 'Missing code or state from Lichess.', '/login'), 400);
   let verifier;
   try {
     verifier = await consumeOAuthState(c, state);
@@ -264,10 +242,7 @@ app.get('/callback', async (c) => {
     verifier = null;
   }
   if (!verifier) {
-    return htmlResponse(
-      errorPage('Login failed', 'Your login attempt expired or was already used. Please try again.', '/login'),
-      400
-    );
+    return htmlResponse(errorPage('Login failed', 'Your login attempt expired or was already used. Try again.', '/login'), 400);
   }
   try {
     const tokenData = await lichess.exchangeCodeForToken({
@@ -278,6 +253,7 @@ app.get('/callback', async (c) => {
     });
     const account = await lichess.getAccount(tokenData.access_token);
     const sid = await createSession(c, { accessToken: tokenData.access_token, username: account.username });
+    // Set-Cookie goes INTO htmlResponse so it actually ships on the Response.
     return htmlResponse(redirectPage('/', `Logged in as ${account.username}.`), 200, {
       'Set-Cookie': sessionCookie(sid),
     });
@@ -289,9 +265,7 @@ app.get('/callback', async (c) => {
 app.post('/login/token', async (c) => {
   const form = await c.req.parseBody();
   const token = String(form.token || '').trim();
-  if (!token) {
-    return htmlResponse(errorPage('Missing token', 'Please paste a Lichess API token.', '/login'), 400);
-  }
+  if (!token) return htmlResponse(errorPage('Missing token', 'Please paste a Lichess API token.', '/login'), 400);
   try {
     const account = await lichess.getAccount(token);
     const sid = await createSession(c, { accessToken: token, username: account.username });
@@ -299,14 +273,7 @@ app.post('/login/token', async (c) => {
       'Set-Cookie': sessionCookie(sid),
     });
   } catch (e) {
-    return htmlResponse(
-      errorPage(
-        'Login failed',
-        `That token didn't work (${e.message}). Double-check you created it using the link above and pasted it in full.`,
-        '/login'
-      ),
-      400
-    );
+    return htmlResponse(errorPage('Login failed', `That token didn't work (${e.message}).`, '/login'), 400);
   }
 });
 
@@ -322,23 +289,14 @@ app.get('/logout', async (c) => {
   return htmlResponse(redirectPage('/', 'Logged out.'), 200, { 'Set-Cookie': clearedSessionCookie() });
 });
 
-// ---------------------------------------------------------------- vs AI (Lichess-hosted)
-
+// ---------------------------------------------------------------- vs AI (Lichess)
 app.get('/game/new/ai', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const body = `
 <form method="post" action="/game/new/ai">
 <p>Level: ${selectField('level', AI_LEVELS.map((l) => ({ value: l, label: `Level ${l}` })), 3)}</p>
-<p>Your color: ${selectField(
-    'color',
-    [
-      { value: 'random', label: 'Random' },
-      { value: 'white', label: 'White' },
-      { value: 'black', label: 'Black' },
-    ],
-    'random'
-  )}</p>
+<p>Your color: ${selectField('color', [{ value: 'random', label: 'Random' }, { value: 'white', label: 'White' }, { value: 'black', label: 'Black' }], 'random')}</p>
 <p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
 <p><input type="submit" value="Start game"></p>
 </form>`;
@@ -357,48 +315,23 @@ app.post('/game/new/ai', async (c) => {
     if (!gameId) throw new Error('Lichess did not return a game id.');
     return htmlResponse(redirectPage(`/game/${gameId}`, 'Game created!'));
   } catch (e) {
-    return htmlResponse(errorPage('Could not start game', e.message, '/game/new/ai', s));
+    return htmlResponse(errorPage('Could not start game', e.message, '/game/new/ai'));
   }
 });
 
 // ---------------------------------------------------------------- Multiplayer
-
 app.get('/game/new/multiplayer', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
-  const colorField = selectField(
-    'color',
-    [
-      { value: 'random', label: 'Random' },
-      { value: 'white', label: 'White' },
-      { value: 'black', label: 'Black' },
-    ],
-    'random'
-  );
-  const ratedCasual = selectField(
-    'rated',
-    [
-      { value: 'false', label: 'Casual' },
-      { value: 'true', label: 'Rated' },
-    ],
-    'false'
-  );
-  const ratedDefaultRanked = selectField(
-    'rated',
-    [
-      { value: 'true', label: 'Rated' },
-      { value: 'false', label: 'Casual' },
-    ],
-    'true'
-  );
+  const colorField = selectField('color', [{ value: 'random', label: 'Random' }, { value: 'white', label: 'White' }, { value: 'black', label: 'Black' }], 'random');
+  const ratedCasual = selectField('rated', [{ value: 'false', label: 'Casual' }, { value: 'true', label: 'Rated' }], 'false');
+  const ratedDefault = selectField('rated', [{ value: 'true', label: 'Rated' }, { value: 'false', label: 'Casual' }], 'true');
   const body = `
 <h4 style="margin:8px 0 4px;">1) Quick pair - play a random opponent</h4>
-<p>Searches the real Lichess matchmaking pool. Default is RATED. You get a
-"searching" page that checks automatically; the search keeps running on the
-server even if you navigate away.</p>
+<p>Searches the real Lichess matchmaking pool. Default is RATED.</p>
 <form method="post" action="/game/new/multiplayer/quick">
 <p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
-<p>${ratedDefaultRanked}</p>
+<p>${ratedDefault}</p>
 <p><input type="submit" value="Find opponent"></p>
 </form>
 <hr>
@@ -411,8 +344,7 @@ server even if you navigate away.</p>
 <p><input type="submit" value="Send challenge"></p>
 </form>
 <hr>
-<h4 style="margin:8px 0 4px;">3) Create a shareable link (open challenge)</h4>
-<p>Makes a link you can send to a friend (SMS, chat...). Whoever opens it joins and the game starts.</p>
+<h4 style="margin:8px 0 4px;">3) Shareable link (open challenge)</h4>
 <form method="post" action="/game/new/multiplayer/open">
 <p>Time control: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p>
 <p>${ratedCasual}</p>
@@ -421,24 +353,22 @@ server even if you navigate away.</p>
   return htmlResponse(page('Play multiplayer', body, s));
 });
 
+// Quick pair: don't hold the phone's request open. Snapshot existing games,
+// run the seek in the background, send the phone to an auto-refreshing
+// /searching page. A "new" game = one not in the snapshot.
 app.post('/game/new/multiplayer/quick', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const form = await c.req.parseBody();
   const tc = findTimeControl(form.timeControl);
-  const rated = form.rated === 'false' ? 'false' : 'true'; // default RANKED
+  const rated = form.rated === 'false' ? 'false' : 'true';
   let exclude = [];
   try {
-    const playing = await lichess.getPlaying(s.accessToken);
-    exclude = (playing.nowPlaying || []).map((g) => g.gameId);
+    exclude = ((await lichess.getPlaying(s.accessToken)).nowPlaying || []).map((g) => g.gameId);
   } catch {
     // ignore
   }
-  const seekParams = {
-    rated,
-    time: Math.round(tc.clock.limit / 60),
-    increment: tc.clock.increment,
-  };
+  const seekParams = { rated, time: Math.round(tc.clock.limit / 60), increment: tc.clock.increment };
   const searchUrl =
     `/searching?started=${Date.now()}&tc=${encodeURIComponent(tc.value)}&rated=${rated}` +
     (exclude.length ? `&exclude=${encodeURIComponent(exclude.join(','))}` : '');
@@ -476,19 +406,18 @@ app.get('/searching', async (c) => {
     err = e.message;
   }
   const newGame = list.find((g) => !exclude.includes(g.gameId));
-  if (newGame) {
-    return htmlResponse(redirectPage(`/game/${newGame.gameId}`, 'Opponent found!'));
-  }
+  if (newGame) return htmlResponse(redirectPage(`/game/${newGame.gameId}`, 'Opponent found!'));
+
   if (elapsed > 90) {
     const body = `
 <p>No opponent found within 90 seconds for ${escapeHtml(tc.label)} ${rated ? 'rated' : 'casual'}.</p>
-<p>The search may still be running on the server - if someone joins, the game will appear on your home page. You can also try another time control.</p>
+<p>The search may still be running on the server - if someone joins, the game will appear on your home page.</p>
 <p><a href="/game/new/multiplayer">&gt;&gt; Back to multiplayer</a> | <a href="/">&gt;&gt; Home</a></p>`;
     return htmlResponse(page('Quick pair', body, s));
   }
   const body = `
 <p><b>Looking for a ${rated ? 'RATED' : 'casual'} ${escapeHtml(tc.label)} opponent... (${elapsed}s)</b></p>
-<p>This page checks automatically every few seconds. If you leave, the search continues on the server and the game will appear on your home page.</p>
+<p>This page checks automatically every few seconds.</p>
 <p><a href="${escapeHtml(selfUrl)}">Check now</a></p>
 ${err ? `<p style="font-size:12px;">${escapeHtml(err)}</p>` : ''}`;
   return htmlResponse(page('Searching for opponent', body, s, { refreshSeconds: 5 }));
@@ -499,9 +428,7 @@ app.post('/game/new/multiplayer/user', async (c) => {
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const form = await c.req.parseBody();
   const username = String(form.username || '').trim();
-  if (!username) {
-    return htmlResponse(errorPage('Missing username', 'Please enter a Lichess username.', '/game/new/multiplayer', s), 400);
-  }
+  if (!username) return htmlResponse(errorPage('Missing username', 'Please enter a Lichess username.', '/game/new/multiplayer'), 400);
   const tc = findTimeControl(form.timeControl);
   const params = { rated: form.rated, color: form.color, variant: 'standard', ...timeControlParams(tc) };
   try {
@@ -509,7 +436,7 @@ app.post('/game/new/multiplayer/user', async (c) => {
     const challengeId = (res.challenge && res.challenge.id) || res.id;
     return htmlResponse(redirectPage(`/challenge/${challengeId}`, `Challenge sent to ${username}.`));
   } catch (e) {
-    return htmlResponse(errorPage('Could not send challenge', e.message, '/game/new/multiplayer', s));
+    return htmlResponse(errorPage('Could not send challenge', e.message, '/game/new/multiplayer'));
   }
 });
 
@@ -524,17 +451,16 @@ app.post('/game/new/multiplayer/open', async (c) => {
     const id = (res.challenge && res.challenge.id) || res.id;
     const url = (res.challenge && res.challenge.url) || res.url;
     const body = `
-<p>Share this link with your opponent (SMS, chat...). The game starts when they open it:</p>
+<p>Share this link with your opponent. The game starts when they open it:</p>
 <p><b>${escapeHtml(url || '(no url returned)')}</b></p>
-<p><a href="/challenge/${escapeHtml(id)}">&gt;&gt; Check status / wait for them</a></p>`;
+<p><a href="/challenge/${escapeHtml(id)}">&gt;&gt; Check status / wait</a></p>`;
     return htmlResponse(page('Open challenge created', body, s));
   } catch (e) {
-    return htmlResponse(errorPage('Could not create challenge', e.message, '/game/new/multiplayer', s));
+    return htmlResponse(errorPage('Could not create challenge', e.message, '/game/new/multiplayer'));
   }
 });
 
 // ---------------------------------------------------------------- Challenges
-
 app.get('/challenge/:id', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
@@ -547,24 +473,17 @@ app.get('/challenge/:id', async (c) => {
     error = e.message;
   }
   const ch = (info && (info.challenge || info)) || {};
-  const status = ch.status;
-  if (status === 'accepted') {
-    return htmlResponse(redirectPage(`/game/${id}`, 'Challenge accepted! Loading game...'));
-  }
+  if (ch.status === 'accepted') return htmlResponse(redirectPage(`/game/${id}`, 'Challenge accepted! Loading game...'));
   let body = '';
-  if (error) {
-    body += `<p>${escapeHtml(error)}</p>`;
-  } else {
-    body += `<p>Status: <b>${escapeHtml(status || 'unknown')}</b></p>`;
+  if (error) body += `<p>${escapeHtml(error)}</p>`;
+  else {
+    body += `<p>Status: <b>${escapeHtml(ch.status || 'unknown')}</b></p>`;
     const url = ch.url || (info && info.url);
-    if (url) {
-      body += `<p>Share link:<br><b>${escapeHtml(url)}</b></p>`;
-      body += '<p>Send that link to your opponent. The game starts when they accept.</p>';
-    }
+    if (url) body += `<p>Share link:<br><b>${escapeHtml(url)}</b></p>`;
   }
   body += `<p><a href="/challenge/${escapeHtml(id)}">Refresh status</a></p>`;
   body += `<p><a href="/game/${escapeHtml(id)}">Try opening the game directly</a></p>`;
-  if (!status || status === 'created' || status === 'sent') {
+  if (!ch.status || ch.status === 'created' || ch.status === 'sent') {
     body += `<form method="post" action="/challenge/${escapeHtml(id)}/cancel"><p><input type="submit" value="Cancel challenge"></p></form>`;
   }
   return htmlResponse(page('Challenge status', body, s, { refreshSeconds: error ? undefined : 10 }));
@@ -578,7 +497,7 @@ app.post('/challenge/:id/accept', async (c) => {
     await lichess.challengeAccept(s.accessToken, id);
     return htmlResponse(redirectPage(`/game/${id}`, 'Challenge accepted!'));
   } catch (e) {
-    return htmlResponse(errorPage('Could not accept challenge', e.message, '/', s));
+    return htmlResponse(errorPage('Could not accept challenge', e.message, '/'));
   }
 });
 
@@ -590,7 +509,7 @@ app.post('/challenge/:id/decline', async (c) => {
     await lichess.challengeDecline(s.accessToken, id);
     return htmlResponse(redirectPage('/', 'Challenge declined.'));
   } catch (e) {
-    return htmlResponse(errorPage('Could not decline challenge', e.message, '/', s));
+    return htmlResponse(errorPage('Could not decline challenge', e.message, '/'));
   }
 });
 
@@ -602,28 +521,18 @@ app.post('/challenge/:id/cancel', async (c) => {
     await lichess.challengeCancel(s.accessToken, id);
     return htmlResponse(redirectPage('/', 'Challenge cancelled.'));
   } catch (e) {
-    return htmlResponse(errorPage('Could not cancel challenge', e.message, '/', s));
+    return htmlResponse(errorPage('Could not cancel challenge', e.message, '/'));
   }
 });
 
-// ---------------------------------------------------------------- vs AI, no login (local engine)
-
+// ---------------------------------------------------------------- vs AI, no login
 app.get('/ai', async (c) => {
   const s = session(c);
   const body = `
-<p>Play vs a computer - no Lichess account needed. The AI's replies come
-from a free online engine; if that fails it falls back to random legal
-moves (difficulty 0 always plays random).</p>
+<p>Play vs a computer - no Lichess account needed.</p>
 <form method="get" action="/ai/play">
 <p>Difficulty: ${selectField('diff', LOCAL_AI_LEVELS, 1)}</p>
-<p>Your color: ${selectField(
-    'color',
-    [
-      { value: 'w', label: 'White' },
-      { value: 'b', label: 'Black' },
-    ],
-    'w'
-  )}</p>
+<p>Your color: ${selectField('color', [{ value: 'w', label: 'White' }, { value: 'b', label: 'Black' }], 'w')}</p>
 <p><input type="submit" value="Start game"></p>
 </form>`;
   return htmlResponse(page('Play vs AI (no login)', body, s));
@@ -659,28 +568,21 @@ app.get('/ai/play', async (c) => {
     resetMessage = 'That position was invalid, so this is a fresh game.';
   }
 
-  if (!fenParam && color === 'b' && !resetMessage) {
-    applyAiMove(chess, await pickAiMove(chess, diff));
-  }
+  if (!fenParam && color === 'b' && !resetMessage) applyAiMove(chess, await pickAiMove(chess, diff));
 
   if (moveParam) {
     if (!UCI_MOVE_RE.test(moveParam)) {
-      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', linkBase({ fen: chess.fen() }), s), 400);
+      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', linkBase({ fen: chess.fen() })), 400);
     }
     try {
-      chess.move({
-        from: moveParam.slice(0, 2),
-        to: moveParam.slice(2, 4),
-        promotion: moveParam.slice(4, 5) || undefined,
-      });
+      chess.move({ from: moveParam.slice(0, 2), to: moveParam.slice(2, 4), promotion: moveParam.slice(4, 5) || undefined });
     } catch {
-      return htmlResponse(errorPage('Illegal move', 'That move is not legal in this position.', linkBase({ fen: chess.fen() }), s), 200);
+      return htmlResponse(errorPage('Illegal move', 'That move is not legal here.', linkBase({ fen: chess.fen() })), 200);
     }
     if (!chess.isGameOver()) applyAiMove(chess, await pickAiMove(chess, diff));
     return htmlResponse(redirectPage(linkBase({ fen: chess.fen() }), 'Move played.'));
   }
 
-  // Never leave the game stuck "waiting" if it's somehow the AI's turn.
   if (!chess.isGameOver() && chess.turn() !== color) {
     applyAiMove(chess, await pickAiMove(chess, diff));
     return htmlResponse(redirectPage(linkBase({ fen: chess.fen() }), 'AI is thinking...'));
@@ -691,23 +593,17 @@ app.get('/ai/play', async (c) => {
   let message;
   let msgColor;
   if (resetMessage) {
-    message = resetMessage;
-    msgColor = '#cc0000';
+    message = resetMessage; msgColor = '#cc0000';
   } else if (chess.isCheckmate()) {
-    message = chess.turn() === color ? 'Checkmate - you lose. Game over.' : 'Checkmate - you win! Game over.';
-    msgColor = '#000099';
+    message = chess.turn() === color ? 'Checkmate - you lose. Game over.' : 'Checkmate - you win! Game over.'; msgColor = '#000099';
   } else if (chess.isStalemate()) {
-    message = 'Stalemate. Game over.';
-    msgColor = '#000099';
+    message = 'Stalemate. Game over.'; msgColor = '#000099';
   } else if (chess.isDraw()) {
-    message = 'Draw. Game over.';
-    msgColor = '#000099';
+    message = 'Draw. Game over.'; msgColor = '#000099';
   } else if (chess.isCheck()) {
-    message = 'Check! Your move.';
-    msgColor = '#cc0000';
+    message = 'Check! Your move.'; msgColor = '#cc0000';
   } else {
-    message = 'Your move - tap a piece, then tap a highlighted square.';
-    msgColor = '#006600';
+    message = 'Your move - tap a piece, then tap a highlighted square.'; msgColor = '#006600';
   }
 
   let body = `<p><b style="color:${msgColor};">${escapeHtml(message)}</b></p>`;
@@ -715,13 +611,11 @@ app.get('/ai/play', async (c) => {
     size,
     interactive: !isOver,
     selected: selected && !isOver ? selected : null,
-    isOwnPiece: (square, piece) => (color === 'w' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
+    isOwnPiece: (sq, piece) => (color === 'w' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
     selectHref: (sq) => linkBase({ fen: chess.fen(), selected: sq }),
     moveHref: (uci) => linkBase({ fen: chess.fen(), move: uci }),
   });
-  if (selected && !isOver) {
-    body += `<p><a href="${escapeHtml(linkBase({ fen: chess.fen() }))}">[Cancel selection]</a></p>`;
-  }
+  if (selected && !isOver) body += `<p><a href="${escapeHtml(linkBase({ fen: chess.fen() }))}">[Cancel selection]</a></p>`;
   body += `<p><a href="${escapeHtml(linkBase({ fen: chess.fen() }))}">Refresh</a> | <a href="/ai">New game (options)</a></p>`;
   body += '<div style="margin-top:10px;font-size:12px;"><b>Difficulty:</b> ';
   body += LOCAL_AI_LEVELS.map((l) =>
@@ -734,8 +628,7 @@ app.get('/ai/play', async (c) => {
   return htmlResponse(page('Play vs AI (no login)', body, s));
 });
 
-// ---------------------------------------------------------------- Game board (Lichess-hosted)
-
+// ---------------------------------------------------------------- Game board
 app.get('/game/:id', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
@@ -745,13 +638,13 @@ app.get('/game/:id', async (c) => {
   const moveParam = (c.req.query('move') || '').toLowerCase();
   if (moveParam) {
     if (!UCI_MOVE_RE.test(moveParam)) {
-      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', `/game/${id}`, s), 400);
+      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', `/game/${id}`), 400);
     }
     try {
       await lichess.boardMove(s.accessToken, id, moveParam);
       return htmlResponse(redirectPage(`/game/${id}`, 'Move played.'));
     } catch (e) {
-      return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}`, s), 200);
+      return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}`), 200);
     }
   }
 
@@ -761,8 +654,7 @@ app.get('/game/:id', async (c) => {
   let game = null;
   let error = null;
   try {
-    const playing = await lichess.getPlaying(s.accessToken);
-    game = (playing.nowPlaying || []).find((g) => g.gameId === id) || null;
+    game = ((await lichess.getPlaying(s.accessToken)).nowPlaying || []).find((g) => g.gameId === id) || null;
   } catch (e) {
     error = e.message;
   }
@@ -772,13 +664,12 @@ app.get('/game/:id', async (c) => {
   if (error) body += `<p>${escapeHtml(error)}</p>`;
 
   if (game) {
-    // Ratings: opponent's comes with the game; ours needs /api/account
-    // (perfs keyed by the game's perf/speed, e.g. "rapid"/"classical").
+    // Ratings: opponent's comes with the game; ours needs /api/account keyed
+    // by the game's perf/speed (e.g. "rapid"/"classical").
     let myRatingStr = '';
     try {
       const account = await lichess.getAccount(s.accessToken);
-      const perfKey = game.perf || game.speed;
-      const perf = (account.perfs || {})[perfKey];
+      const perf = (account.perfs || {})[game.perf || game.speed];
       if (perf && perf.rating) myRatingStr = ` (${perf.rating}${perf.prov ? '?' : ''})`;
     } catch {
       // rating is cosmetic - never block the game on it
@@ -786,9 +677,7 @@ app.get('/game/:id', async (c) => {
     const opp = game.opponent || {};
     const oppStr = opp.rating
       ? ` (${opp.rating}${opp.provisional ? '?' : ''})`
-      : opp.aiLevel
-        ? ` (AI level ${opp.aiLevel})`
-        : '';
+      : opp.aiLevel ? ` (AI level ${opp.aiLevel})` : '';
 
     const orientation = game.color === 'black' ? 'black' : 'white';
     const canMove = !!game.isMyTurn;
@@ -796,14 +685,11 @@ app.get('/game/:id', async (c) => {
       size,
       interactive: canMove,
       selected: canMove ? selected : null,
-      isOwnPiece: (square, piece) =>
-        game.color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase(),
+      isOwnPiece: (sq, piece) => (game.color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
       selectHref: (sq) => `/game/${encodeURIComponent(id)}?selected=${sq}`,
       moveHref: (uci) => `/game/${encodeURIComponent(id)}?move=${uci}`,
     });
-    body += `<p>You${myRatingStr} as <b>${escapeHtml(game.color)}</b> vs <b>${escapeHtml(
-      opp.username || '?'
-    )}</b>${oppStr}</p>`;
+    body += `<p>You${myRatingStr} as <b>${escapeHtml(game.color)}</b> vs <b>${escapeHtml(opp.username || '?')}</b>${oppStr}</p>`;
     body += canMove
       ? '<p><b>Your move - tap a piece, then tap a highlighted square.</b></p>'
       : '<p>Waiting for opponent... (this page refreshes automatically)</p>';
@@ -840,7 +726,7 @@ app.get('/game/:id', async (c) => {
           chess.loadPgn(finished.pgn);
           body += renderBoard(chess.fen(), 'white', { size });
         } catch {
-          // best effort only
+          // best effort
         }
       }
     } else {
@@ -858,14 +744,12 @@ app.post('/game/:id/move', async (c) => {
   const id = c.req.param('id');
   const form = await c.req.parseBody();
   const move = normalizeUci(form.move);
-  if (!move) {
-    return htmlResponse(errorPage('Invalid move', 'Please enter a move like e2e4.', `/game/${id}`, s), 400);
-  }
+  if (!move) return htmlResponse(errorPage('Invalid move', 'Please enter a move like e2e4.', `/game/${id}`), 400);
   try {
     await lichess.boardMove(s.accessToken, id, move);
     return htmlResponse(redirectPage(`/game/${id}`, 'Move played.'));
   } catch (e) {
-    return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}`, s), 200);
+    return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}`), 200);
   }
 });
 
@@ -877,20 +761,23 @@ app.post('/game/:id/resign', async (c) => {
     await lichess.boardResign(s.accessToken, id);
     return htmlResponse(redirectPage('/', 'You resigned.'));
   } catch (e) {
-    return htmlResponse(errorPage('Could not resign', e.message, `/game/${id}`, s), 200);
+    return htmlResponse(errorPage('Could not resign', e.message, `/game/${id}`), 200);
   }
 });
 
 // ---------------------------------------------------------------- Puzzles
-
 app.get('/puzzle', async (c) => {
   const s = session(c);
   try {
     let data;
     let extraHeaders = {};
     if (s) {
+      // Logged in: Lichess serves a fresh puzzle every call.
       data = await lichess.puzzleNext(s.accessToken);
     } else {
+      // Anonymous: Lichess only exposes daily puzzles. Rotate the last few
+      // days' daily puzzles so "New puzzle" varies. (If the day-offset
+      // endpoint is unavailable, fall back to today's daily.)
       const cookies = parseCookies(c);
       const offset = Math.abs(parseInt(cookies['pzday'], 10) || 0) % 6;
       extraHeaders = { 'Set-Cookie': `pzday=${(offset + 1) % 6}; Path=/; Max-Age=31536000` };
@@ -903,7 +790,7 @@ app.get('/puzzle', async (c) => {
     const id = data.puzzle.id;
     return htmlResponse(redirectPage(`/puzzle/${id}?step=0`, 'Loading puzzle...'), 200, extraHeaders);
   } catch (e) {
-    return htmlResponse(errorPage('Could not load puzzle', e.message, '/', s), 500);
+    return htmlResponse(errorPage('Could not load puzzle', e.message, '/'), 500);
   }
 });
 
@@ -918,7 +805,7 @@ app.get('/puzzle/:id', async (c) => {
   try {
     puzzle = await lichess.puzzleById(s ? s.accessToken : null, id);
   } catch (e) {
-    return htmlResponse(errorPage('Could not load puzzle', e.message, '/puzzle', s));
+    return htmlResponse(errorPage('Could not load puzzle', e.message, '/puzzle'));
   }
 
   let base;
@@ -927,26 +814,24 @@ app.get('/puzzle/:id', async (c) => {
     base = puzzleBasePosition(puzzle);
     solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci);
   } catch (e) {
-    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle', s), 500);
+    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle'), 500);
   }
   const solverColor = sideToMove(base.fen);
   let state;
   try {
     state = puzzleStateFrom(base.fen, solution, step);
   } catch (e) {
-    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle', s), 500);
+    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle'), 500);
   }
 
   const moveRaw = c.req.query('move');
   if (moveRaw) {
     const guess = normalizeUci(moveRaw);
     if (!UCI_MOVE_RE.test(guess)) {
-      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', `/puzzle/${id}?step=${step}`, s), 400);
+      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', `/puzzle/${id}?step=${step}`), 400);
     }
     const result = checkPuzzleGuess(solution, state.step, guess);
-    if (result.correct) {
-      return htmlResponse(redirectPage(`/puzzle/${id}?step=${result.newStep}&msg=correct`, 'Correct!'));
-    }
+    if (result.correct) return htmlResponse(redirectPage(`/puzzle/${id}?step=${result.newStep}&msg=correct`, 'Correct!'));
     const kind = result.wrongPromotion ? 'promo' : 'wrong';
     return htmlResponse(redirectPage(`/puzzle/${id}?step=${step}&msg=${kind}`, 'Not quite...'));
   }
@@ -957,8 +842,7 @@ app.get('/puzzle/:id', async (c) => {
 
   let body = '';
   if (msg === 'wrong') body += '<p><b style="color:#cc0000;">Not quite - try again.</b></p>';
-  if (msg === 'promo')
-    body += '<p><b style="color:#cc0000;">Right square, but not that promotion piece. Type the move below (e.g. e7e8n).</b></p>';
+  if (msg === 'promo') body += '<p><b style="color:#cc0000;">Right square, but not that promotion piece. Type the move below (e.g. e7e8n).</b></p>';
   if (msg === 'correct') body += '<p><b style="color:#006600;">Correct!</b></p>';
 
   if (state.solved) {
@@ -971,8 +855,7 @@ app.get('/puzzle/:id', async (c) => {
       size,
       interactive: true,
       selected,
-      isOwnPiece: (square, piece) =>
-        solverColor === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase(),
+      isOwnPiece: (sq, piece) => (solverColor === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
       selectHref: (sq) => `/puzzle/${pid}?step=${state.step}&selected=${sq}`,
       moveHref: (uci) => `/puzzle/${pid}?step=${state.step}&move=${uci}`,
     });
@@ -995,35 +878,28 @@ app.post('/puzzle/:id', async (c) => {
   const form = await c.req.parseBody();
   const step = parseStep(form.step);
   const guess = normalizeUci(form.move);
-
   let puzzle;
   try {
     puzzle = await lichess.puzzleById(s ? s.accessToken : null, id);
   } catch (e) {
-    return htmlResponse(errorPage('Could not load puzzle', e.message, '/puzzle', s));
+    return htmlResponse(errorPage('Could not load puzzle', e.message, '/puzzle'));
   }
   let solution;
   try {
-    puzzleBasePosition(puzzle); // validates the payload; throws with diagnostics
+    puzzleBasePosition(puzzle);
     solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci);
   } catch (e) {
-    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle', s), 500);
+    return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle'), 500);
   }
-  if (!guess) {
-    return htmlResponse(redirectPage(`/puzzle/${id}?step=${step}`, 'No move entered.'));
-  }
+  if (!guess) return htmlResponse(redirectPage(`/puzzle/${id}?step=${step}`, 'No move entered.'));
   const result = checkPuzzleGuess(solution, step, guess);
-  if (result.correct) {
-    return htmlResponse(redirectPage(`/puzzle/${id}?step=${result.newStep}&msg=correct`, 'Correct!'));
-  }
+  if (result.correct) return htmlResponse(redirectPage(`/puzzle/${id}?step=${result.newStep}&msg=correct`, 'Correct!'));
   const kind = result.wrongPromotion ? 'promo' : 'wrong';
   return htmlResponse(redirectPage(`/puzzle/${id}?step=${step}&msg=${kind}`, 'Not quite...'));
 });
 
 // ---------------------------------------------------------------- Fallbacks
-
 app.notFound((c) => htmlResponse(errorPage('Not found', 'That page does not exist.'), 404));
-
 app.onError((err, c) => {
   console.error(err);
   return htmlResponse(errorPage('Something went wrong', err.message), 500);

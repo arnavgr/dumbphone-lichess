@@ -1,15 +1,10 @@
-// ---------------------------------------------------------------------------
-// Tiny HTML helpers. Every page this app serves is plain, boring HTML:
-//   - no JavaScript anywhere (dumbphone browsers may not run it at all)
-//   - no external CSS / fonts / frameworks
-//   - only the most basic tags: <p>, <a>, <table>, <form>, <select>, <input>
-//
-// htmlResponse() is the SINGLE place HTML becomes an HTTP response. Extra
-// headers (e.g. Set-Cookie) must be passed INTO it - Hono does not merge
-// c.header() onto a raw Response you return yourself. Every response is
-// Cache-Control: no-store so proxy browsers never cache boards/move links.
-// ---------------------------------------------------------------------------
-
+// Plain-HTML helpers. No client JS anywhere - dumbphone browsers may not run
+// it. htmlResponse() is the SINGLE place HTML becomes an HTTP response:
+//   - extra headers (Set-Cookie!) MUST be passed INTO it. Hono does not merge
+//     c.header() onto a raw Response you return yourself - that is what
+//     silently dropped the login cookie before.
+//   - every response is Cache-Control: no-store, so Opera Mini's proxy never
+//     serves a stale board or replays an old move/puzzle link.
 export function escapeHtml(s) {
   return String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, (ch) => ({
     '&': '&amp;',
@@ -31,16 +26,13 @@ export function htmlResponse(body, status = 200, headers = {}) {
   });
 }
 
-// opts.refreshSeconds: <meta http-equiv="refresh"> for pages that wait on
-// something (opponent's turn, challenge acceptance). Only used on pages
-// with NO side effects in the URL.
 export function page(title, body, session, opts = {}) {
   const refresh = opts.refreshSeconds
     ? `<meta http-equiv="refresh" content="${Number(opts.refreshSeconds) || 30}">`
     : '';
   const nav = session
     ? `<a href="/">Home</a> | <a href="/settings">Size</a> | <b>${escapeHtml(session.username)}</b> | <a href="/logout">Logout</a>`
-    : '<a href="/">Home</a> | <a href="/settings">Size</a> | <a href="/login">Login</a>';
+    : `<a href="/">Home</a> | <a href="/settings">Size</a> | <a href="/login">Login</a>`;
   return `<!DOCTYPE html>
 <html>
 <head>

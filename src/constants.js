@@ -1,13 +1,6 @@
-// ---------------------------------------------------------------------------
-// Game configuration.
-//
-// By design this app only offers standard chess with Rapid/Classical clocks:
-//   - the local tap-to-move legality check (chess.js) only understands
-//     standard chess, and
-//   - standard rapid/classical is what works across every Lichess path we
-//     use (Board API games, challenges, matchmaking pool).
-// ---------------------------------------------------------------------------
-
+// Standard chess only, Rapid/Classical only. These are the two speeds that
+// work across every Lichess path used here (AI games, challenges, and the
+// real matchmaking pool used by quick pair).
 export const TIME_CONTROLS = [
   { value: 'rapid-600-0', label: 'Rapid 10+0', clock: { limit: 600, increment: 0 } },
   { value: 'rapid-600-5', label: 'Rapid 10+5', clock: { limit: 600, increment: 5 } },
@@ -20,14 +13,10 @@ export function findTimeControl(value) {
   return TIME_CONTROLS.find((t) => t.value === value) || TIME_CONTROLS[0];
 }
 
-// AI level for real Lichess-hosted AI games (/game/new/ai), via the Board
-// API's /api/challenge/ai - Lichess's own Stockfish, levels 1-8.
+// Lichess-hosted AI (its own Stockfish), levels 1-8.
 export const AI_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8];
 
-// Difficulty for the anonymous, no-login local AI mode (/ai) - a different
-// scale on purpose, since it's a different engine path (see chess.js):
-// 0 plays uniformly-random legal moves, 1-4 call a remote engine at
-// increasing search depth (falling back to random if that call fails).
+// Anonymous local AI mode difficulty (a different engine path, see chess.js).
 export const LOCAL_AI_LEVELS = [
   { value: 0, label: '0 - Random moves' },
   { value: 1, label: '1 - Easy' },
