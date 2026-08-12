@@ -1,22 +1,11 @@
 // ---------------------------------------------------------------------------
-// All chess.js-dependent logic used by this app, in one file:
-//   - Board rendering: renders a FEN position as an HTML tap-to-move <table>
-//   - Puzzle logic: replays a Lichess puzzle PGN and applies solution moves
-//   - Local AI opponent: anonymous "vs AI" mode, no Lichess account needed
-//
-// chess.js runs here on the Worker only (server-side) - the phone never runs
-// any JS, it just gets a fresh rendered board + form on every request.
+// All chess.js-dependent logic: board rendering, puzzle logic, local AI.
+// chess.js runs on the Worker only - the phone just gets rendered HTML.
 // ---------------------------------------------------------------------------
 import { Chess } from 'chess.js';
 
 // ============================================================================
 // Board rendering
-//
-// Renders a FEN position as an HTML <table> board using PNG piece icons
-// (served as static assets from /images/*.png) plus tap-to-move: tap a piece
-// to select it (its legal destination squares light up), then tap a
-// destination to play the move - no typing, no JS, just plain <a> links
-// carrying the move in the URL.
 // ============================================================================
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
@@ -26,8 +15,8 @@ const PIECE_FILES = {
   k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP',
 };
 
-const CELL = 24; // px, board square size (kept small: 8*24+coords fits a 240px screen)
-const IMG = 20; // px, piece icon size
+const CELL = 24;
+const IMG = 20;
 
 function pieceImg(code) {
   const f = PIECE_FILES[code];
@@ -37,10 +26,9 @@ function pieceImg(code) {
 
 const SPACER = `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
 
-// FEN piece-placement field -> map of square ("e4") -> piece char ("P","n",...)
 export function fenToPieceMap(fen) {
   const placement = fen.split(' ')[0];
-  const rows = placement.split('/'); // rows[0] = rank 8 ... rows[7] = rank 1
+  const rows = placement.split('/');
   const map = {};
   for (let i = 0; i < 8; i++) {
     const rank = 8 - i;
@@ -57,11 +45,6 @@ export function fenToPieceMap(fen) {
   return map;
 }
 
-// Legal destination squares for the piece on `square`, given the current FEN,
-// as a map of destination square -> full UCI move ("e2e4", "e7e8q").
-// Queen promotion is the one-tap default; the typed-move fallback form on
-// each page handles underpromotion. Best-effort only: any error just means
-// no highlighted squares, never a crash.
 function legalMovesFrom(fen, square) {
   const from = square.toLowerCase();
   try {
@@ -78,13 +61,6 @@ function legalMovesFrom(fen, square) {
   }
 }
 
-// orientation: 'white' (default) or 'black' (black at bottom)
-// opts:
-//   interactive  - if true, own pieces and legal destinations become <a> links
-//   selected     - currently-selected square, or null
-//   selectHref(square)        -> URL for tapping an own piece to select it
-//   moveHref(uci)             -> URL for tapping a highlighted destination
-//   isOwnPiece(square, piece) -> whether this piece belongs to the mover
 export function renderBoard(fen, orientation = 'white', opts = {}) {
   const { interactive = false, selected = null, selectHref, moveHref, isOwnPiece } = opts;
   const pieceMap = fenToPieceMap(fen);
@@ -117,7 +93,7 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
       else if (uci) bg = '#7bde7b';
       let inner = piece ? pieceImg(piece) : SPACER;
       if (uci && moveHref) {
-        // Solid colors only (no rgba/border-radius): must survive ancient browsers.
+        // Solid colors only - rgba/border-radius can be missing on old browsers.
         const targetContent = piece
           ? pieceImg(piece)
           : `<div style="width:${IMG / 2}px;height:${IMG / 2}px;background:#333;margin:auto;"></div>`;
@@ -141,37 +117,18 @@ export function sideToMove(fen) {
 // ============================================================================
 // Puzzle logic
 //
-// Lichess puzzle payloads give a full game PGN plus `initialPly` and a
-// `solution` array of UCI moves. initialPly already points past the
-// opponent's setup/blunder move - the FEN at that ply is the position ready
-// for the solver to move:
-//   solution[0] is the first move the solver must find
-//   solution[1] is the opponent's forced reply (auto-played)
-//   solution[2] is the solver's second move to find, and so on.
+// Lichess puzzle payload: full game PGN + initialPly + solution (UCI array).
+// The solver-to-move position is the game position at some ply, from which
+// solution[0] must be legal. Previously we blindly replayed `initialPly`
+// moves - if that replay produced nothing (chess.js version quirk, PGN
+// parse issue, missing initialPly...), EVERY puzzle rendered the starting
+// position and EVERY guess was wrong. That's exactly the reported bug.
+//
+// So now: puzzleBasePosition() VALIDATES the derived position by checking
+// that solution[0] (and solution[1]) are legal from it, and if not, it
+// searches nearby plies for the one that fits. If nothing fits, it throws
+// with full diagnostics so the error page tells us exactly why.
 // ============================================================================
-
-export function fenAtInitialPly(pgn, initialPly) {
-  const temp = new Chess();
-  temp.loadPgn(pgn);
-  const moves = temp.history();
-  const replay = new Chess();
-  for (let i = 0; i < initialPly && i < moves.length; i++) {
-    replay.move(moves[i]);
-  }
-  return replay.fen();
-}
-
-export function applyUciMoves(baseFen, uciMoves) {
-  const chess = new Chess(baseFen);
-  for (const m of uciMoves) {
-    if (!m) continue;
-    const from = m.slice(0, 2);
-    const to = m.slice(2, 4);
-    const promotion = m.length > 4 ? m.slice(4, 5) : undefined;
-    chess.move({ from, to, promotion });
-  }
-  return chess.fen();
-}
 
 export function normalizeUci(move) {
   return String(move || '')
@@ -180,26 +137,135 @@ export function normalizeUci(move) {
     .replace(/[^a-h1-8qrbn]/g, '');
 }
 
-// Given a puzzle payload and how many solution moves have been applied so
-// far ("step", starting at 0), compute the current board FEN and whether the
-// puzzle is solved.
-export function puzzleState(puzzle, step) {
-  const baseFen = fenAtInitialPly(puzzle.game.pgn, puzzle.puzzle.initialPly);
-  const solution = puzzle.puzzle.solution || [];
+// Parse the puzzle game's PGN into verbose moves. Primary path is
+// chess.js's own loadPgn; the fallback is a crude tokenizer + replay, so a
+// loadPgn failure mode can't silently leave us with zero moves.
+function pgnToVerboseMoves(pgn) {
+  const text = String(pgn || '');
+  try {
+    const tmp = new Chess();
+    tmp.loadPgn(text);
+    const hist = tmp.history({ verbose: true });
+    if (hist.length) return hist;
+  } catch {
+    // fall through to the manual parser
+  }
+  const tokens = text
+    .replace(/\{[^}]*\}/g, ' ') // { comments }
+    .replace(/\$\d+/g, ' ') // NAGs
+    .replace(/\d+\.{1,3}/g, ' ') // move numbers: "1." "12..."
+    .replace(/1-0|0-1|1\/2-1\/2|\*/g, ' ') // result markers
+    .split(/\s+/)
+    .filter((t) => t && !/^\.\.?$/.test(t));
+  const tmp = new Chess();
+  const out = [];
+  for (const t of tokens) {
+    try {
+      const m = tmp.move(t);
+      if (!m) break; // chess.js 0.x-style null
+      out.push(m);
+    } catch {
+      break;
+    }
+  }
+  return out;
+}
+
+// Computes the solver-to-move position for a puzzle.
+// Returns { fen, plyUsed, totalPlies, healed }. Throws with a diagnostic
+// message if no position fits the solution (that message is shown to the
+// user - send it back if you ever see it).
+export function puzzleBasePosition(puzzle) {
+  const solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci).filter(Boolean);
+  if (!solution.length) throw new Error('Puzzle payload has no solution moves.');
+
+  const pgn = puzzle.game && puzzle.game.pgn;
+  const moves = pgnToVerboseMoves(pgn);
+  if (!moves.length) {
+    const p = String(pgn || '');
+    throw new Error(
+      `Could not parse any moves from the puzzle PGN (length ${p.length}, preview: "${p.slice(0, 60)}").`
+    );
+  }
+
+  // FEN after every ply: fens[p] = position with p half-moves played.
+  const replay = new Chess();
+  const fens = [replay.fen()];
+  for (const m of moves) {
+    replay.move({ from: m.from, to: m.to, promotion: m.promotion });
+    fens.push(replay.fen());
+  }
+
+  // True if solution[0] (and solution[1] if present) can be played from fens[ply].
+  const fits = (ply) => {
+    if (!Number.isFinite(ply) || ply < 0 || ply >= fens.length) return false;
+    try {
+      const ch = new Chess(fens[ply]);
+      const u0 = solution[0];
+      ch.move({ from: u0.slice(0, 2), to: u0.slice(2, 4), promotion: u0.slice(4, 5) || undefined });
+      if (solution.length > 1) {
+        const u1 = solution[1];
+        ch.move({ from: u1.slice(0, 2), to: u1.slice(2, 4), promotion: u1.slice(4, 5) || undefined });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const claimed = Number(puzzle.puzzle.initialPly);
+
+  // 1) Trust initialPly when it checks out.
+  if (fits(claimed)) {
+    return { fen: fens[claimed], plyUsed: claimed, totalPlies: moves.length, healed: false };
+  }
+
+  // 2) Self-heal: nearest ply where the solution fits.
+  for (let d = 1; d <= moves.length + 1; d++) {
+    if (fits(claimed + d)) {
+      return { fen: fens[claimed + d], plyUsed: claimed + d, totalPlies: moves.length, healed: true };
+    }
+    if (fits(claimed - d)) {
+      return { fen: fens[claimed - d], plyUsed: claimed - d, totalPlies: moves.length, healed: true };
+    }
+    if (!Number.isFinite(claimed) && fits(d)) {
+      return { fen: fens[d], plyUsed: d, totalPlies: moves.length, healed: true };
+    }
+  }
+
+  throw new Error(
+    `Could not locate the puzzle position: initialPly=${JSON.stringify(puzzle.puzzle.initialPly)}, ` +
+      `parsed ${moves.length} plies, first solution move ${solution[0]}.`
+  );
+}
+
+export function applyUciMoves(baseFen, uciMoves) {
+  const chess = new Chess(baseFen);
+  for (const m of uciMoves) {
+    if (!m) continue;
+    chess.move({
+      from: m.slice(0, 2),
+      to: m.slice(2, 4),
+      promotion: m.length > 4 ? m.slice(4, 5) : undefined,
+    });
+  }
+  return chess.fen();
+}
+
+// Board/state after applying `step` solution moves on top of the base FEN.
+export function puzzleStateFrom(baseFen, solution, step) {
   const clampedStep = Math.max(0, Math.min(step, solution.length));
   const fen = applyUciMoves(baseFen, solution.slice(0, clampedStep));
-  const solved = clampedStep >= solution.length;
-  return { fen, solved, step: clampedStep, solutionLength: solution.length };
+  return {
+    fen,
+    solved: clampedStep >= solution.length,
+    step: clampedStep,
+    solutionLength: solution.length,
+  };
 }
 
 // ============================================================================
-// Local AI opponent
-//
-// Lichess-account-free chess engine for the anonymous "vs AI" mode.
-// The opponent's moves come from a free third-party remote engine
-// (chess-api.com) when possible, falling back to a uniformly-random legal
-// move if that call fails - so a flaky third party never leaves a game
-// stuck, it just makes the AI weaker.
+// Local AI opponent (anonymous "vs AI" mode)
 // ============================================================================
 
 const REMOTE_DEPTH = { 1: 2, 2: 5, 3: 10, 4: 18 };
@@ -232,7 +298,7 @@ async function fetchRemoteAiMove(fen, depth) {
       };
     }
   } catch {
-    // network error, timeout, or bad JSON - fall through to a random move
+    // fall through to a random move
   } finally {
     clearTimeout(timer);
   }
@@ -257,7 +323,7 @@ export function applyAiMove(chess, move) {
       try {
         chess.move(fallback);
       } catch {
-        // Nothing legal could be applied - leave the position as-is.
+        // leave position as-is
       }
     }
   }
