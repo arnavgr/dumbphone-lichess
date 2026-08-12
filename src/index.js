@@ -21,6 +21,7 @@ import {
   normalizeUci,
   pickAiMove,
   applyAiMove,
+  BOARD_SIZE_KEYS,
 } from './chess.js';
 import {
   page,
@@ -38,6 +39,7 @@ const app = new Hono();
 const UCI_MOVE_RE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
 const SQUARE_RE = /^[a-h][1-8]$/;
 const LICHESS_SCOPES = ['board:play', 'challenge:read', 'challenge:write', 'puzzle:read'];
+const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
 app.use('*', async (c, next) => {
   try {
@@ -49,6 +51,13 @@ app.use('*', async (c, next) => {
 });
 
 const session = (c) => c.get('session') || null;
+
+// Board size picked on /settings, stored in the "bsize" cookie so it works
+// logged-out and persists across pages/visits on the phone.
+function boardSize(c) {
+  const v = parseCookies(c)['bsize'];
+  return BOARD_SIZE_KEYS.includes(v) ? v : 'normal';
+}
 
 function timeControlParams(tc) {
   const params = {};
@@ -72,8 +81,6 @@ function checkPuzzleGuess(solution, step, guess) {
     if (solution[newStep]) newStep += 1; // auto-play opponent's forced reply
     return { correct: true, newStep };
   }
-  // Tap-to-move can only send queen promotions; detect "right square, wrong
-  // promotion piece" so we can point the user at the typed form.
   const wrongPromotion =
     g.length >= 4 && expected.length >= 5 && g !== expected && g.slice(0, 4) === expected.slice(0, 4);
   return { correct: false, wrongPromotion };
@@ -91,6 +98,36 @@ function describeChallenge(ch) {
       : '';
   return `${ch.rated ? 'Rated' : 'Casual'} ${speed}${variant}`.trim();
 }
+
+// ---------------------------------------------------------------- Settings
+
+const SIZE_HINTS = {
+  tiny: 'very small screens (128x160)',
+  small: 'small screens (~160px wide)',
+  normal: '240x320 screens',
+  large: '320px+ wide screens',
+};
+
+app.get('/settings', async (c) => {
+  const s = session(c);
+  const requested = c.req.query('s');
+  let extraHeaders = {};
+  if (requested && BOARD_SIZE_KEYS.includes(requested)) {
+    extraHeaders = { 'Set-Cookie': `bsize=${requested}; Path=/; Max-Age=31536000` };
+  }
+  const current = requested && BOARD_SIZE_KEYS.includes(requested) ? requested : boardSize(c);
+  let body = '<p>Pick a board size for your screen. The choice is saved on this phone.</p>';
+  for (const k of BOARD_SIZE_KEYS) {
+    const active = k === current;
+    body += `<p><b>${k}</b> - ${SIZE_HINTS[k]} `;
+    body += active
+      ? '<b style="color:#006600;">[current]</b>'
+      : `<a href="/settings?s=${k}">Use this size</a>`;
+    body += '</p>';
+    body += renderBoard(START_FEN, 'white', { size: k });
+  }
+  return htmlResponse(page('Board size', body, s), 200, extraHeaders);
+});
 
 // ---------------------------------------------------------------- Home
 
@@ -142,8 +179,9 @@ app.get('/', async (c) => {
   if (nowPlaying.length > 0) {
     const first = nowPlaying.find((g) => g.isMyTurn) || nowPlaying[0];
     const oppName = (first.opponent && first.opponent.username) || 'opponent';
+    const oppRating = first.opponent && first.opponent.rating ? ` (${first.opponent.rating})` : '';
     body += '<p><b>You have a game in progress.</b></p>';
-    body += `<p><a href="/game/${escapeHtml(first.gameId)}">&gt;&gt; Continue vs ${escapeHtml(oppName)}${first.isMyTurn ? ' (your move)' : ''}</a></p>`;
+    body += `<p><a href="/game/${escapeHtml(first.gameId)}">&gt;&gt; Continue vs ${escapeHtml(oppName)}${oppRating}${first.isMyTurn ? ' (your move)' : ''}</a></p>`;
     if (nowPlaying.length > 1) body += renderGamesList(nowPlaying);
   } else {
     body += '<p>No games in progress.</p>';
@@ -324,9 +362,6 @@ app.post('/game/new/ai', async (c) => {
 });
 
 // ---------------------------------------------------------------- Multiplayer
-// Standard chess only, Rapid/Classical only. The headline feature is
-// QUICK PAIR: ranked matchmaking against random opponents, via the Board
-// API's /api/board/seek.
 
 app.get('/game/new/multiplayer', async (c) => {
   const s = session(c);
@@ -386,12 +421,6 @@ server even if you navigate away.</p>
   return htmlResponse(page('Play multiplayer', body, s));
 });
 
-// Quick pair. Dumbphone-friendly design: we do NOT hold the phone's request
-// open while waiting for a match. We snapshot the games you already have,
-// kick off the seek in the background (waitUntil), and send the phone to a
-// tiny auto-refreshing /searching page. A "new" game = a game not in the
-// snapshot. If the runtime has no waitUntil, we fall back to a short
-// synchronous seek.
 app.post('/game/new/multiplayer/quick', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
@@ -403,7 +432,7 @@ app.post('/game/new/multiplayer/quick', async (c) => {
     const playing = await lichess.getPlaying(s.accessToken);
     exclude = (playing.nowPlaying || []).map((g) => g.gameId);
   } catch {
-    // ignore - worst case we can't tell old games from the new one
+    // ignore
   }
   const seekParams = {
     rated,
@@ -419,7 +448,7 @@ app.post('/game/new/multiplayer/quick', async (c) => {
     try {
       await lichess.quickPairSeek(s.accessToken, seekParams, 20000);
     } catch {
-      // /searching will just time out and say so
+      // /searching will time out and say so
     }
   }
   return htmlResponse(redirectPage(searchUrl, 'Joining the matchmaking pool...'));
@@ -444,7 +473,7 @@ app.get('/searching', async (c) => {
   try {
     list = (await lichess.getPlaying(s.accessToken)).nowPlaying || [];
   } catch (e) {
-    err = e.message; // transient - keep trying below
+    err = e.message;
   }
   const newGame = list.find((g) => !exclude.includes(g.gameId));
   if (newGame) {
@@ -602,6 +631,7 @@ moves (difficulty 0 always plays random).</p>
 
 app.get('/ai/play', async (c) => {
   const s = session(c);
+  const size = boardSize(c);
   const q = c.req.query();
   let diff = parseInt(q.diff, 10);
   if (!Number.isFinite(diff) || diff < 0) diff = 1;
@@ -682,6 +712,7 @@ app.get('/ai/play', async (c) => {
 
   let body = `<p><b style="color:${msgColor};">${escapeHtml(message)}</b></p>`;
   body += renderBoard(chess.fen(), orientation, {
+    size,
     interactive: !isOver,
     selected: selected && !isOver ? selected : null,
     isOwnPiece: (square, piece) => (color === 'w' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
@@ -709,6 +740,7 @@ app.get('/game/:id', async (c) => {
   const s = session(c);
   if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const id = c.req.param('id');
+  const size = boardSize(c);
 
   const moveParam = (c.req.query('move') || '').toLowerCase();
   if (moveParam) {
@@ -740,9 +772,28 @@ app.get('/game/:id', async (c) => {
   if (error) body += `<p>${escapeHtml(error)}</p>`;
 
   if (game) {
+    // Ratings: opponent's comes with the game; ours needs /api/account
+    // (perfs keyed by the game's perf/speed, e.g. "rapid"/"classical").
+    let myRatingStr = '';
+    try {
+      const account = await lichess.getAccount(s.accessToken);
+      const perfKey = game.perf || game.speed;
+      const perf = (account.perfs || {})[perfKey];
+      if (perf && perf.rating) myRatingStr = ` (${perf.rating}${perf.prov ? '?' : ''})`;
+    } catch {
+      // rating is cosmetic - never block the game on it
+    }
+    const opp = game.opponent || {};
+    const oppStr = opp.rating
+      ? ` (${opp.rating}${opp.provisional ? '?' : ''})`
+      : opp.aiLevel
+        ? ` (AI level ${opp.aiLevel})`
+        : '';
+
     const orientation = game.color === 'black' ? 'black' : 'white';
     const canMove = !!game.isMyTurn;
     body += renderBoard(game.fen, orientation, {
+      size,
       interactive: canMove,
       selected: canMove ? selected : null,
       isOwnPiece: (square, piece) =>
@@ -750,9 +801,9 @@ app.get('/game/:id', async (c) => {
       selectHref: (sq) => `/game/${encodeURIComponent(id)}?selected=${sq}`,
       moveHref: (uci) => `/game/${encodeURIComponent(id)}?move=${uci}`,
     });
-    body += `<p>Playing as <b>${escapeHtml(game.color)}</b> vs <b>${escapeHtml(
-      (game.opponent && game.opponent.username) || '?'
-    )}</b></p>`;
+    body += `<p>You${myRatingStr} as <b>${escapeHtml(game.color)}</b> vs <b>${escapeHtml(
+      opp.username || '?'
+    )}</b>${oppStr}</p>`;
     body += canMove
       ? '<p><b>Your move - tap a piece, then tap a highlighted square.</b></p>'
       : '<p>Waiting for opponent... (this page refreshes automatically)</p>';
@@ -787,7 +838,7 @@ app.get('/game/:id', async (c) => {
         try {
           const chess = new Chess();
           chess.loadPgn(finished.pgn);
-          body += renderBoard(chess.fen(), 'white');
+          body += renderBoard(chess.fen(), 'white', { size });
         } catch {
           // best effort only
         }
@@ -840,8 +891,6 @@ app.get('/puzzle', async (c) => {
     if (s) {
       data = await lichess.puzzleNext(s.accessToken);
     } else {
-      // Anonymous: Lichess only exposes daily puzzles without login. Rotate
-      // through the last few days' daily puzzles so "New puzzle" varies.
       const cookies = parseCookies(c);
       const offset = Math.abs(parseInt(cookies['pzday'], 10) || 0) % 6;
       extraHeaders = { 'Set-Cookie': `pzday=${(offset + 1) % 6}; Path=/; Max-Age=31536000` };
@@ -861,6 +910,7 @@ app.get('/puzzle', async (c) => {
 app.get('/puzzle/:id', async (c) => {
   const s = session(c);
   const id = c.req.param('id');
+  const size = boardSize(c);
   const step = parseStep(c.req.query('step'));
   const msg = c.req.query('msg');
 
@@ -887,7 +937,6 @@ app.get('/puzzle/:id', async (c) => {
     return htmlResponse(errorPage('Puzzle setup error', e.message, '/puzzle', s), 500);
   }
 
-  // A highlighted destination was tapped - check it against the solution.
   const moveRaw = c.req.query('move');
   if (moveRaw) {
     const guess = normalizeUci(moveRaw);
@@ -913,12 +962,13 @@ app.get('/puzzle/:id', async (c) => {
   if (msg === 'correct') body += '<p><b style="color:#006600;">Correct!</b></p>';
 
   if (state.solved) {
-    body += renderBoard(state.fen, solverColor);
+    body += renderBoard(state.fen, solverColor, { size });
     body += `<p>Puzzle rating: ${escapeHtml(puzzle.puzzle.rating)}</p>`;
     body += '<p><b>Puzzle solved!</b></p>';
     body += '<p><a href="/puzzle">&gt;&gt; Next puzzle</a></p>';
   } else {
     body += renderBoard(state.fen, solverColor, {
+      size,
       interactive: true,
       selected,
       isOwnPiece: (square, piece) =>

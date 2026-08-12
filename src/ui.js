@@ -1,17 +1,13 @@
 // ---------------------------------------------------------------------------
 // Tiny HTML helpers. Every page this app serves is plain, boring HTML:
 //   - no JavaScript anywhere (dumbphone browsers may not run it at all)
-//   - no external CSS / fonts / frameworks (extra requests = slow or broken)
+//   - no external CSS / fonts / frameworks
 //   - only the most basic tags: <p>, <a>, <table>, <form>, <select>, <input>
 //
-// htmlResponse() is the SINGLE place HTML becomes an HTTP response. Two
-// important things live there:
-//   - extra headers (e.g. Set-Cookie) must be passed INTO htmlResponse().
-//     Hono does not merge c.header() onto a raw Response you return
-//     yourself - doing that is what silently dropped the login cookie.
-//   - every response is Cache-Control: no-store. Aggressive GET caching
-//     (Opera Mini's proxy, carrier proxies, back-button caches) would
-//     otherwise serve stale boards or replay old move links.
+// htmlResponse() is the SINGLE place HTML becomes an HTTP response. Extra
+// headers (e.g. Set-Cookie) must be passed INTO it - Hono does not merge
+// c.header() onto a raw Response you return yourself. Every response is
+// Cache-Control: no-store so proxy browsers never cache boards/move links.
 // ---------------------------------------------------------------------------
 
 export function escapeHtml(s) {
@@ -35,16 +31,16 @@ export function htmlResponse(body, status = 200, headers = {}) {
   });
 }
 
-// opts.refreshSeconds: add a <meta http-equiv="refresh"> so pages that wait
-// on something (opponent's turn, challenge being accepted) re-poll without
-// any JavaScript. Only ever used on pages with NO side effects in the URL.
+// opts.refreshSeconds: <meta http-equiv="refresh"> for pages that wait on
+// something (opponent's turn, challenge acceptance). Only used on pages
+// with NO side effects in the URL.
 export function page(title, body, session, opts = {}) {
   const refresh = opts.refreshSeconds
     ? `<meta http-equiv="refresh" content="${Number(opts.refreshSeconds) || 30}">`
     : '';
   const nav = session
-    ? `<a href="/">Home</a> | <b>${escapeHtml(session.username)}</b> | <a href="/logout">Logout</a>`
-    : '<a href="/">Home</a> | <a href="/login">Login</a>';
+    ? `<a href="/">Home</a> | <a href="/settings">Size</a> | <b>${escapeHtml(session.username)}</b> | <a href="/logout">Logout</a>`
+    : '<a href="/">Home</a> | <a href="/settings">Size</a> | <a href="/login">Login</a>';
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -61,8 +57,6 @@ ${body}
 </html>`;
 }
 
-// Redirect without JS: meta refresh + a plain link as fallback. content="1"
-// because some very old browsers ignore content="0".
 export function redirectPage(url, msg = 'Please wait...') {
   const u = escapeHtml(url);
   return `<!DOCTYPE html>
@@ -98,8 +92,9 @@ export function renderGamesList(games) {
   let html = '<ul style="padding-left:18px;margin:6px 0;">';
   for (const g of games) {
     const opp = (g.opponent && (g.opponent.username || g.opponent.name)) || '?';
+    const oppRating = g.opponent && g.opponent.rating ? ` (${g.opponent.rating})` : '';
     const turn = g.isMyTurn ? ' <b>(your move)</b>' : '';
-    html += `<li><a href="/game/${escapeHtml(g.gameId)}">${escapeHtml(g.color || '?')} vs ${escapeHtml(opp)}</a> - ${escapeHtml(g.speed || '')}${turn}</li>`;
+    html += `<li><a href="/game/${escapeHtml(g.gameId)}">${escapeHtml(g.color || '?')} vs ${escapeHtml(opp)}${oppRating}</a> - ${escapeHtml(g.speed || '')}${turn}</li>`;
   }
   return html + '</ul>';
 }
