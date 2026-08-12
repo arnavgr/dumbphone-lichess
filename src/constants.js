@@ -1,21 +1,13 @@
-// All variants Lichess supports by default.
-export const VARIANTS = [
-  { value: 'standard', label: 'Standard' },
-  { value: 'chess960', label: 'Chess960' },
-  { value: 'crazyhouse', label: 'Crazyhouse' },
-  { value: 'antichess', label: 'Antichess' },
-  { value: 'atomic', label: 'Atomic' },
-  { value: 'horde', label: 'Horde' },
-  { value: 'kingOfTheHill', label: 'King of the Hill' },
-  { value: 'racingKings', label: 'Racing Kings' },
-  { value: 'threeCheck', label: 'Three-check' },
-];
+// ---------------------------------------------------------------------------
+// Game configuration.
+//
+// By design this app only offers standard chess with Rapid/Classical clocks:
+//   - the local tap-to-move legality check (chess.js) only understands
+//     standard chess, and
+//   - standard rapid/classical is what works across every Lichess path we
+//     use (Board API games, challenges, matchmaking pool).
+// ---------------------------------------------------------------------------
 
-// Only Rapid and Classical are offered anywhere in this app (by request) -
-// these also happen to be the two speeds guaranteed to work everywhere in
-// the Lichess Board API (AI games, direct/open challenges, AND the real
-// matchmaking pool used by "quick pair"), so there's no per-feature
-// restriction logic needed anymore.
 export const TIME_CONTROLS = [
   { value: 'rapid-600-0', label: 'Rapid 10+0', clock: { limit: 600, increment: 0 } },
   { value: 'rapid-600-5', label: 'Rapid 10+5', clock: { limit: 600, increment: 5 } },
@@ -29,11 +21,11 @@ export function findTimeControl(value) {
 }
 
 // AI level for real Lichess-hosted AI games (/game/new/ai), via the Board
-// API's /api/challenge/ai - this is Lichess's own Stockfish, levels 1-8.
+// API's /api/challenge/ai - Lichess's own Stockfish, levels 1-8.
 export const AI_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 // Difficulty for the anonymous, no-login local AI mode (/ai) - a different
-// scale on purpose, since it's a different engine path (see src/chess.js):
+// scale on purpose, since it's a different engine path (see chess.js):
 // 0 plays uniformly-random legal moves, 1-4 call a remote engine at
 // increasing search depth (falling back to random if that call fails).
 export const LOCAL_AI_LEVELS = [

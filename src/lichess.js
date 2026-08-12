@@ -1,12 +1,8 @@
 // ---------------------------------------------------------------------------
-// Everything that talks to Lichess, or supports talking to Lichess, in one
-// file:
+// Everything that talks to Lichess, or supports talking to Lichess:
 //   - PKCE helpers for the OAuth2 login flow
 //   - KV-backed session + OAuth-state storage
 //   - The lichess.org HTTP API wrapper (Board API, challenges, puzzles...)
-//
-// Split out from chess.js-dependent game logic (see chess.js) and from the
-// route handlers (see index.js).
 // ---------------------------------------------------------------------------
 
 // ============================================================================
@@ -39,7 +35,7 @@ export async function codeChallengeS256(verifier) {
 // Session + OAuth-state storage (Cloudflare KV, via the `KV` binding)
 // ============================================================================
 
-const SESSION_TTL_SECONDS = 60 * 60 * 24 * 350; // ~ lifetime of a Lichess access token (~1 year)
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 350; // ~ lifetime of a Lichess access token
 const OAUTH_STATE_TTL_SECONDS = 600; // 10 minutes to complete the login round trip
 
 export function parseCookies(c) {
@@ -91,7 +87,6 @@ export async function destroySession(c, sid) {
 }
 
 // --- OAuth state (short lived, holds the PKCE code_verifier between /login and /callback) ---
-
 export async function saveOAuthState(c, state, verifier) {
   await c.env.KV.put(`oauth:${state}`, verifier, { expirationTtl: OAUTH_STATE_TTL_SECONDS });
 }
@@ -106,8 +101,7 @@ export async function consumeOAuthState(c, state) {
 // ============================================================================
 // Thin wrapper around the Lichess HTTP API (https://lichess.org/api).
 // Every function returns parsed JSON on success and throws a LichessError on
-// failure, so callers can show the real error message from Lichess instead
-// of failing silently.
+// failure, so callers can show the real error message from Lichess.
 // ============================================================================
 
 const BASE = 'https://lichess.org';
@@ -200,9 +194,9 @@ export const boardResign = (token, gameId) =>
   lpostEmpty(token, `/api/board/game/${gameId}/resign`);
 export const boardAbort = (token, gameId) => lpostEmpty(token, `/api/board/game/${gameId}/abort`);
 
-// Board API "seek" (join the real-time matchmaking pool). This holds the HTTP
-// connection open until a match is found, so we bound it with a timeout and just
-// report back whether the stream closed (matched) or we gave up (timed out).
+// Board API "seek" (join the real-time matchmaking pool). Holds the HTTP
+// connection open until matched or timeout. We watch the stream for the
+// {"game":{...}} event so we can bail out early when a match is found.
 export async function quickPairSeek(token, params, timeoutMs = 20000) {
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -226,11 +220,17 @@ export async function quickPairSeek(token, params, timeoutMs = 20000) {
     }
     if (res.body) {
       const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
       try {
         // eslint-disable-next-line no-constant-condition
         while (true) {
-          const { done } = await reader.read();
+          const { done, value } = await reader.read();
           if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          // The match event looks like: {"game":{"id":"..."}}
+          if (/"game"\s*:/.test(buf)) return { matched: true };
+          if (buf.length > 4096) buf = buf.slice(-512);
         }
       } catch {
         // reader threw because we aborted -> treat as timeout below
@@ -252,8 +252,18 @@ export const challengeUser = (token, username, params) =>
   lpost(token, `/api/challenge/${encodeURIComponent(username)}`, params);
 export const challengeShow = (token, challengeId) =>
   lget(token, `/api/challenge/${challengeId}/show`);
+export const challengeList = (token) => lget(token, '/api/challenge');
+export const challengeAccept = (token, challengeId) =>
+  lpostEmpty(token, `/api/challenge/${challengeId}/accept`);
+export const challengeDecline = (token, challengeId) =>
+  lpostEmpty(token, `/api/challenge/${challengeId}/decline`);
+export const challengeCancel = (token, challengeId) =>
+  lpostEmpty(token, `/api/challenge/${challengeId}/cancel`);
 
 // --- Puzzles ---
 export const puzzleDaily = () => lget(null, '/api/puzzle/daily');
+// Daily puzzle of `days` ago (0 = today). Not available on every Lichess
+// deployment forever, so callers MUST fall back to puzzleDaily() on error.
+export const puzzleDailyDay = (days) => lget(null, `/api/puzzle/daily/${days}`);
 export const puzzleNext = (token) => lget(token, '/api/puzzle/next');
 export const puzzleById = (token, id) => lget(token, `/api/puzzle/${id}`);
