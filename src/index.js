@@ -293,6 +293,116 @@ app.get('/logout', async (c) => {
   return htmlResponse(redirectPage('/', 'Logged out.'), 200, { 'Set-Cookie': clearedSessionCookie() });
 });
 
+// ---------------------------------------------------------------- Owner quick-login
+//
+// A convenience login for the site owner only: a password-gated form that,
+// on success, logs in using a pre-issued personal Lichess API token instead
+// of pasting it in every time. Both secrets below are Cloudflare Worker
+// *secrets* (set with `wrangler secret put NAME`, or via the Cloudflare
+// dashboard: Workers & Pages -> this worker -> Settings -> Variables and
+// Secrets -> Add -> mark "Encrypt"). They are NEVER written to
+// wrangler.toml, so they never end up in this git repo:
+//   - OWNER_TOKEN          your personal Lichess API token (same scopes as
+//                          the "paste a token" login: board:play,
+//                          challenge:read, challenge:write, puzzle:read)
+//   - OWNER_LOGIN_PASSWORD any password only you know, chosen by you
+//
+// This route is intentionally NOT linked from /login - it's meant to be
+// bookmarked directly at /owner-login. That's just an extra layer on top
+// of the password itself, not a substitute for a strong password: this
+// endpoint is on the public internet like every other route in this app.
+const OWNER_LOGIN_ATTEMPT_LIMIT = 6;
+const OWNER_LOGIN_WINDOW_SECONDS = 15 * 60;
+
+// Constant-time-ish string comparison so a wrong password doesn't leak
+// information via how quickly the response comes back.
+function passwordsMatch(a, b) {
+  const strA = String(a || '');
+  const strB = String(b || '');
+  const len = Math.max(strA.length, strB.length, 1);
+  let diff = strA.length === strB.length ? 0 : 1;
+  for (let i = 0; i < len; i++) {
+    const ca = i < strA.length ? strA.charCodeAt(i) : 0;
+    const cb = i < strB.length ? strB.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
+  }
+  return diff === 0;
+}
+
+function clientIp(c) {
+  return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown';
+}
+
+// Simple KV-backed rate limit on wrong-password attempts, keyed by IP.
+async function ownerLoginAttempts(c) {
+  const key = `ownerlogin:${clientIp(c)}`;
+  let count = 0;
+  try {
+    const raw = await c.env.KV.get(key);
+    count = raw ? parseInt(raw, 10) || 0 : 0;
+  } catch {
+    // if KV is briefly unavailable, fail open on rate-limiting (the
+    // password check itself still applies) rather than locking everyone out
+  }
+  return { key, count };
+}
+
+app.get('/owner-login', async (c) => {
+  const s = session(c);
+  const body = `
+<p>Owner-only quick login.</p>
+<form method="post" action="/owner-login">
+<p>Password: <input type="password" name="password" size="20"></p>
+<p><input type="submit" value="Log in"></p>
+</form>`;
+  return htmlResponse(page('Owner login', body, s));
+});
+
+app.post('/owner-login', async (c) => {
+  const configured = c.env.OWNER_TOKEN && c.env.OWNER_LOGIN_PASSWORD;
+  if (!configured) {
+    return htmlResponse(
+      errorPage(
+        'Not configured',
+        'OWNER_TOKEN and OWNER_LOGIN_PASSWORD secrets are not set on this Worker yet.',
+        '/login'
+      ),
+      500
+    );
+  }
+  const { key, count } = await ownerLoginAttempts(c);
+  if (count >= OWNER_LOGIN_ATTEMPT_LIMIT) {
+    return htmlResponse(
+      errorPage('Too many attempts', 'Too many wrong attempts from this connection. Try again later.', '/owner-login'),
+      429
+    );
+  }
+  const form = await c.req.parseBody();
+  const password = String(form.password || '');
+  if (!passwordsMatch(password, c.env.OWNER_LOGIN_PASSWORD)) {
+    try {
+      await c.env.KV.put(key, String(count + 1), { expirationTtl: OWNER_LOGIN_WINDOW_SECONDS });
+    } catch {
+      // non-fatal - worst case the rate limit doesn't tighten this time
+    }
+    return htmlResponse(errorPage('Login failed', 'Wrong password.', '/owner-login'), 401);
+  }
+  try {
+    await c.env.KV.delete(key);
+  } catch {
+    // non-fatal
+  }
+  try {
+    const account = await lichess.getAccount(c.env.OWNER_TOKEN);
+    const sid = await createSession(c, { accessToken: c.env.OWNER_TOKEN, username: account.username });
+    return htmlResponse(redirectPage('/', `Logged in as ${account.username}.`), 200, {
+      'Set-Cookie': sessionCookie(sid),
+    });
+  } catch (e) {
+    return htmlResponse(errorPage('Login failed', `The stored owner token didn't work (${e.message}).`, '/owner-login'), 400);
+  }
+});
+
 // ---------------------------------------------------------------- vs AI (Lichess)
 app.get('/game/new/ai', async (c) => {
   const s = session(c);
@@ -551,14 +661,21 @@ app.get('/ai/play', async (c) => {
   const moveParam = (q.move || '').toLowerCase();
   const selectedParam = (q.selected || '').toLowerCase();
   const selected = SQUARE_RE.test(selectedParam) ? selectedParam : null;
+  const lmParam = (q.lm || '').toLowerCase();
+  let lastMove = UCI_MOVE_RE.test(lmParam) ? lmParam : null;
 
   const linkBase = (extra = {}) => {
     const params = new URLSearchParams();
     params.set('diff', String(diff));
     params.set('color', color);
-    for (const [k, v] of Object.entries(extra)) params.set(k, String(v));
+    for (const [k, v] of Object.entries(extra)) {
+      if (v === undefined || v === null || v === '') continue;
+      params.set(k, String(v));
+    }
     return `/ai/play?${params.toString()}`;
   };
+
+  const moveToUci = (m) => `${m.from}${m.to}${m.promotion || ''}`;
 
   let chess;
   let resetMessage = null;
@@ -568,25 +685,34 @@ app.get('/ai/play', async (c) => {
     chess = new Chess();
     resetMessage = 'That position was invalid, so this is a fresh game.';
   }
+  if (resetMessage) lastMove = null;
 
-  if (!fenParam && color === 'b' && !resetMessage) applyAiMove(chess, await pickAiMove(chess, diff));
+  if (!fenParam && color === 'b' && !resetMessage) {
+    const applied = applyAiMove(chess, await pickAiMove(chess, diff));
+    lastMove = applied ? moveToUci(applied) : null;
+  }
 
   if (moveParam) {
     if (!UCI_MOVE_RE.test(moveParam)) {
-      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', linkBase({ fen: chess.fen() })), 400);
+      return htmlResponse(errorPage('Invalid move', 'That move was not understood.', linkBase({ fen: chess.fen(), lm: lastMove })), 400);
     }
     try {
       chess.move({ from: moveParam.slice(0, 2), to: moveParam.slice(2, 4), promotion: moveParam.slice(4, 5) || undefined });
     } catch {
-      return htmlResponse(errorPage('Illegal move', 'That move is not legal here.', linkBase({ fen: chess.fen() })), 200);
+      return htmlResponse(errorPage('Illegal move', 'That move is not legal here.', linkBase({ fen: chess.fen(), lm: lastMove })), 200);
     }
-    if (!chess.isGameOver()) applyAiMove(chess, await pickAiMove(chess, diff));
-    return htmlResponse(redirectPage(linkBase({ fen: chess.fen() }), 'Move played.'));
+    lastMove = moveParam;
+    if (!chess.isGameOver()) {
+      const applied = applyAiMove(chess, await pickAiMove(chess, diff));
+      if (applied) lastMove = moveToUci(applied);
+    }
+    return htmlResponse(redirectPage(linkBase({ fen: chess.fen(), lm: lastMove }), 'Move played.'));
   }
 
   if (!chess.isGameOver() && chess.turn() !== color) {
-    applyAiMove(chess, await pickAiMove(chess, diff));
-    return htmlResponse(redirectPage(linkBase({ fen: chess.fen() }), 'AI is thinking...'));
+    const applied = applyAiMove(chess, await pickAiMove(chess, diff));
+    if (applied) lastMove = moveToUci(applied);
+    return htmlResponse(redirectPage(linkBase({ fen: chess.fen(), lm: lastMove }), 'AI is thinking...'));
   }
 
   const orientation = color === 'b' ? 'black' : 'white';
@@ -612,17 +738,18 @@ app.get('/ai/play', async (c) => {
     size,
     interactive: !isOver,
     selected: selected && !isOver ? selected : null,
+    lastMove,
     isOwnPiece: (sq, piece) => (color === 'w' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
-    selectHref: (sq) => linkBase({ fen: chess.fen(), selected: sq }),
-    moveHref: (uci) => linkBase({ fen: chess.fen(), move: uci }),
+    selectHref: (sq) => linkBase({ fen: chess.fen(), selected: sq, lm: lastMove }),
+    moveHref: (uci) => linkBase({ fen: chess.fen(), move: uci, lm: lastMove }),
   });
-  if (selected && !isOver) body += `<p><a href="${escapeHtml(linkBase({ fen: chess.fen() }))}">[Cancel selection]</a></p>`;
-  body += `<p><a href="${escapeHtml(linkBase({ fen: chess.fen() }))}">Refresh</a> | <a href="/ai">New game (options)</a></p>`;
+  if (selected && !isOver) body += `<p><a href="${escapeHtml(linkBase({ fen: chess.fen(), lm: lastMove }))}">[Cancel selection]</a></p>`;
+  body += `<p><a href="${escapeHtml(linkBase({ fen: chess.fen(), lm: lastMove }))}">Refresh</a> | <a href="/ai">New game (options)</a></p>`;
   body += '<div style="margin-top:10px;font-size:12px;"><b>Difficulty:</b> ';
   body += LOCAL_AI_LEVELS.map((l) =>
     String(l.value) === String(diff)
       ? `<b>[${l.value}]</b>`
-      : `<a href="${escapeHtml(linkBase({ fen: chess.fen(), diff: String(l.value) }))}">${l.value}</a>`
+      : `<a href="${escapeHtml(linkBase({ fen: chess.fen(), diff: String(l.value), lm: lastMove }))}">${l.value}</a>`
   ).join(' ');
   body += '</div>';
   body += `<div style="margin-top:10px;font-size:12px;"><b>New game:</b> <a href="/ai/play?diff=${diff}&amp;color=w">White</a> | <a href="/ai/play?diff=${diff}&amp;color=b">Black</a></div>`;
@@ -684,6 +811,7 @@ app.get('/game/:id', async (c) => {
       size,
       interactive: canMove,
       selected: canMove ? selected : null,
+      lastMove: game.lastMove || null,
       isOwnPiece: (sq, piece) => (game.color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
       selectHref: (sq) => `/game/${encodeURIComponent(id)}?selected=${sq}`,
       moveHref: (uci) => `/game/${encodeURIComponent(id)}?move=${uci}`,
@@ -723,7 +851,10 @@ app.get('/game/:id', async (c) => {
         try {
           const chess = new Chess();
           chess.loadPgn(finished.pgn);
-          body += renderBoard(chess.fen(), 'white', { size });
+          const hist = chess.history({ verbose: true });
+          const last = hist[hist.length - 1];
+          const lastMove = last ? `${last.from}${last.to}${last.promotion || ''}` : null;
+          body += renderBoard(chess.fen(), 'white', { size, lastMove });
         } catch {
           // best effort
         }
@@ -766,17 +897,30 @@ app.post('/game/:id/resign', async (c) => {
 
 // ---------------------------------------------------------------- Puzzles
 //
-// IMPORTANT: we deliberately do NOT use /api/puzzle/next. It is tied to
-// Lichess's per-user puzzle session: it keeps returning the SAME puzzle
-// until a round result is recorded on their servers - which this site never
-// does, because puzzle moves are checked locally. That's exactly the
-// "same puzzle forever" bug.
+// IMPORTANT: we deliberately do NOT use /api/puzzle/next as the primary
+// source. It is tied to Lichess's per-user puzzle session: it keeps
+// returning the SAME puzzle until a round result is recorded on their
+// servers - which this site never does, because puzzle moves are checked
+// locally. For anonymous visitors it's even simpler and worse: with no
+// token there IS no per-user session, so the app used to fall back to
+// /api/puzzle/daily, which is *the same puzzle for the whole world* until
+// midnight UTC. Both of those were the "same puzzle every time" bug.
 //
-// Instead we use /api/puzzle/streak: stateless, no auth needed, and every
-// call returns a fresh batch of puzzle IDs (ramping up in difficulty). We
-// keep the batch in the "pzk" cookie and hand out one puzzle per visit,
-// fetching a new batch when it runs out. The "?r=" cache-buster on all
-// "new puzzle" links stops proxy browsers from pinning the redirect.
+// An earlier version of this route tried to work around that with an
+// `/api/puzzle/streak` call and an `/api/puzzle/daily/{days}` fallback -
+// neither of which is a real Lichess API endpoint (checked against the
+// published OpenAPI spec at github.com/lichess-org/api), so both calls
+// always failed and silently fell through to the buggy paths above.
+//
+// The real fix: /api/puzzle/batch/{angle} returns several *distinct*
+// puzzle ids in one request, no auth required. We fetch a batch of
+// PUZZLE_BATCH_SIZE, keep the queue in the "pzk" cookie, and hand out one
+// puzzle per visit - refilling the batch once the queue runs dry. Every
+// actual puzzle position is still loaded through /api/puzzle/{id} (via
+// puzzleById below), which is a real, well-tested endpoint.
+const PUZZLE_ANGLE = 'mix';
+const PUZZLE_BATCH_SIZE = 20;
+
 app.get('/puzzle', async (c) => {
   const s = session(c);
   try {
@@ -786,16 +930,24 @@ app.get('/puzzle', async (c) => {
     if (queue.length > 0) {
       id = queue.shift();
     } else {
-      let data;
+      let batch = null;
       try {
-        data = await lichess.puzzleStreak();
+        batch = await lichess.puzzleBatch(s ? s.accessToken : null, PUZZLE_ANGLE, PUZZLE_BATCH_SIZE);
       } catch {
-        data = s ? await lichess.puzzleNext(s.accessToken) : await lichess.puzzleDaily();
+        batch = null;
       }
-      id = data.puzzle.id;
-      queue = String(data.streak || '')
-        .split(/\s+/)
-        .filter((x) => x && x !== id);
+      const ids = (batch && Array.isArray(batch.puzzles) ? batch.puzzles : [])
+        .map((p) => p && p.id)
+        .filter(Boolean);
+      if (ids.length > 0) {
+        id = ids.shift();
+        queue = ids;
+      } else {
+        // Last-resort fallback if the batch endpoint itself is unreachable.
+        // This may repeat, but it's better than a hard error.
+        const fallback = s ? await lichess.puzzleNext(s.accessToken) : await lichess.puzzleDaily();
+        id = fallback && fallback.puzzle && fallback.puzzle.id;
+      }
     }
     if (!id) throw new Error('Lichess did not return a puzzle.');
     const extraHeaders = {
@@ -836,6 +988,10 @@ app.get('/puzzle/:id', async (c) => {
   } catch (e) {
     return htmlResponse(errorPage('Puzzle setup error', e.message, newPuzzleHref()), 500);
   }
+  // Whatever move most recently landed us on state.fen - the puzzle's own
+  // setup move, the solver's correct guess, or the auto-played forced
+  // reply - highlighted the same way Lichess highlights the last move.
+  const lastMove = state.step > 0 ? solution[state.step - 1] : null;
 
   const moveRaw = c.req.query('move');
   if (moveRaw) {
@@ -859,7 +1015,7 @@ app.get('/puzzle/:id', async (c) => {
   if (msg === 'correct') body += '<p><b style="color:#006600;">Correct!</b></p>';
 
   if (state.solved) {
-    body += renderBoard(state.fen, solverColor, { size });
+    body += renderBoard(state.fen, solverColor, { size, lastMove });
     body += `<p>Puzzle rating: ${escapeHtml(puzzle.puzzle.rating)}</p>`;
     body += '<p><b>Puzzle solved!</b></p>';
     body += `<p><a href="${newPuzzleHref()}">&gt;&gt; Next puzzle</a></p>`;
@@ -868,6 +1024,7 @@ app.get('/puzzle/:id', async (c) => {
       size,
       interactive: true,
       selected,
+      lastMove,
       isOwnPiece: (sq, piece) => (solverColor === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
       selectHref: (sq) => `/puzzle/${pid}?step=${state.step}&selected=${sq}`,
       moveHref: (uci) => `/puzzle/${pid}?step=${state.step}&move=${uci}`,

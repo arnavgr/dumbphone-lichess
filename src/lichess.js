@@ -225,12 +225,18 @@ export const challengeCancel = (token, challengeId) =>
 
 // Puzzles
 export const puzzleDaily = () => lget(null, '/api/puzzle/daily');
-// Daily puzzle of `days` ago (0 = today). Not guaranteed to exist forever, so
-// callers MUST fall back to puzzleDaily() on error.
-export const puzzleDailyDay = (days) => lget(null, `/api/puzzle/daily/${days}`);
 export const puzzleNext = (token) => lget(token, '/api/puzzle/next');
 export const puzzleById = (token, id) => lget(token, `/api/puzzle/${id}`);
-// Stateless puzzle source: a fresh batch of puzzle IDs on every call, no
-// auth required. Unlike /api/puzzle/next, it does NOT pin the user to their
-// current puzzle-round, so this is what we use for "next puzzle".
-export const puzzleStreak = () => lget(null, '/api/puzzle/streak');
+// A batch of several *distinct* puzzle ids in one call. Works with or
+// without a token (anonymous callers just get generic puzzles; logged-in
+// callers get puzzles Lichess hasn't shown them before). `angle` is a
+// theme filter - 'mix' is Lichess's own recommended value for "any theme".
+//
+// NOTE: earlier versions of this file called `/api/puzzle/streak` and
+// `/api/puzzle/daily/{days}` here, neither of which is a real Lichess API
+// endpoint (verified against lichess-org/api's published OpenAPI spec).
+// Both calls were silently failing and falling back to `puzzleDaily()` /
+// `puzzleNext()`, which is why "next puzzle" kept showing the exact same
+// puzzle - see the comment above the `/puzzle` route in src/index.js.
+export const puzzleBatch = (token, angle, nb) =>
+  lget(token, `/api/puzzle/batch/${encodeURIComponent(angle)}?nb=${encodeURIComponent(nb)}`);

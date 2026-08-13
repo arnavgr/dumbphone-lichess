@@ -61,9 +61,21 @@ function legalMovesFrom(fen, square) {
   }
 }
 
-// opts: size, interactive, selected, selectHref(sq), moveHref(uci), isOwnPiece(sq,piece)
+// Squares touched by the last move played, as a UCI string (e.g. "e2e4"
+// or "e7e8q"). Returns [] if there's nothing to highlight.
+function lastMoveSquares(lastMove) {
+  const uci = String(lastMove || '').toLowerCase();
+  if (uci.length < 4) return [];
+  const from = uci.slice(0, 2);
+  const to = uci.slice(2, 4);
+  if (!/^[a-h][1-8]$/.test(from) || !/^[a-h][1-8]$/.test(to)) return [];
+  return [from, to];
+}
+
+// opts: size, interactive, selected, lastMove (uci string), selectHref(sq),
+// moveHref(uci), isOwnPiece(sq,piece)
 export function renderBoard(fen, orientation = 'white', opts = {}) {
-  const { interactive = false, selected = null, selectHref, moveHref, isOwnPiece } = opts;
+  const { interactive = false, selected = null, selectHref, moveHref, isOwnPiece, lastMove } = opts;
   const spec = boardSizeSpec(opts.size);
   const CELL = spec.cell;
   const IMG = spec.img;
@@ -71,6 +83,7 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
   const showCoords = COORD > 0;
   const pieceMap = fenToPieceMap(fen);
   const movesFromSelected = interactive && selected ? legalMovesFrom(fen, selected) : {};
+  const lastSquares = lastMoveSquares(lastMove);
   const ranksTopDown = orientation === 'black' ? [1, 2, 3, 4, 5, 6, 7, 8] : [8, 7, 6, 5, 4, 3, 2, 1];
   const filesOrder = orientation === 'black' ? [...FILES].reverse() : FILES;
   const coordStyle = `background:#ccc;font-size:${Math.max(7, COORD - 2)}px;text-align:center;vertical-align:middle;`;
@@ -96,6 +109,7 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
       const uci = movesFromSelected[square];
       if (selected === square) bg = '#ffed4a';
       else if (uci) bg = '#7bde7b';
+      else if (lastSquares.includes(square)) bg = isLight ? '#cdeaa8' : '#a3cf7d';
       let inner = piece ? pieceImg(piece, IMG) : `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
       if (uci && moveHref) {
         const dot = Math.max(4, Math.floor(IMG / 2));
@@ -260,18 +274,26 @@ export async function pickAiMove(chess, diff) {
   return randomLegalMove(chess);
 }
 
+// Returns the move actually played (which may be a random fallback, not
+// the requested `move`, if that move turned out illegal) - or null if
+// nothing could be played. Callers that want to display/highlight the
+// move that was made (e.g. a "last move" indicator) should use this
+// return value rather than assuming `move` itself was applied.
 export function applyAiMove(chess, move) {
-  if (!move) return;
+  if (!move) return null;
   try {
     chess.move(move);
+    return move;
   } catch {
     const fallback = randomLegalMove(chess);
     if (fallback) {
       try {
         chess.move(fallback);
+        return fallback;
       } catch {
-        // leave as-is
+        return null;
       }
     }
+    return null;
   }
 }
