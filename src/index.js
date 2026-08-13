@@ -918,6 +918,21 @@ app.post('/game/:id/resign', async (c) => {
 // puzzle per visit - refilling the batch once the queue runs dry. Every
 // actual puzzle position is still loaded through /api/puzzle/{id} (via
 // puzzleById below), which is a real, well-tested endpoint.
+//
+// SECOND BUG (this is the one that was still repeating puzzles even after
+// the batch endpoint was wired up): the batch endpoint's request method
+// and URL were right, but the response shape was misread. Every
+// puzzle-returning Lichess endpoint - /api/puzzle/{id}, /api/puzzle/next,
+// /api/puzzle/daily, AND each entry of /api/puzzle/batch/{angle}'s
+// `puzzles` array - wraps the puzzle under a nested `puzzle` object:
+// `{ game: {...}, puzzle: { id, rating, solution, ... } }`. This file
+// already relies on that nested shape everywhere else (see
+// puzzleBasePosition() in src/chess.js, which reads `puzzle.puzzle.id`
+// and `puzzle.puzzle.solution`). The code below, though, was reading
+// `p.id` directly on each batch entry instead of `p.puzzle.id` - which is
+// always undefined, so `ids` was always an empty array, so this ALWAYS
+// fell through to the "last resort" fallback (puzzleNext / puzzleDaily) -
+// which is exactly the same-puzzle-repeating behavior described above.
 const PUZZLE_ANGLE = 'mix';
 const PUZZLE_BATCH_SIZE = 20;
 
@@ -937,7 +952,7 @@ app.get('/puzzle', async (c) => {
         batch = null;
       }
       const ids = (batch && Array.isArray(batch.puzzles) ? batch.puzzles : [])
-        .map((p) => p && p.id)
+        .map((p) => p && p.puzzle && p.puzzle.id)
         .filter(Boolean);
       if (ids.length > 0) {
         id = ids.shift();
