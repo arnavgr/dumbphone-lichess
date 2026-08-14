@@ -28,22 +28,20 @@ export function htmlResponse(body, status = 200, headers = {}) {
 
 export function page(title, body, session, opts = {}) {
   const refresh = opts.refreshSeconds
-    ? `<meta http-equiv="refresh" content="${Number(opts.refreshSeconds) || 30}">`
+    ? `<meta http-equiv="refresh" content="${opts.refreshSeconds}">`
     : '';
   const nav = session
-    ? `<a href="/">Home</a> | <a href="/settings">Size</a> | <b>${escapeHtml(session.username)}</b> | <a href="/logout">Logout</a>`
-    : `<a href="/">Home</a> | <a href="/settings">Size</a> | <a href="/login">Login</a>`;
+    ? `<p><a href="/">Home</a> | <a href="/settings">Size</a> | ${escapeHtml(session.username)} | <a href="/logout">Logout</a></p>`
+    : `<p><a href="/">Home</a> | <a href="/settings">Size</a> | <a href="/login">Login</a></p>`;
   return `<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 ${refresh}
-<title>${escapeHtml(title)} - Lichess Dumbphone</title>
+<title>${escapeHtml(title)}</title>
 </head>
-<body style="margin:0;padding:6px;font-family:sans-serif;font-size:14px;color:#111;background:#fff;">
-<div style="font-size:12px;margin-bottom:8px;">${nav}</div>
-<h3 style="margin:4px 0 8px;">${escapeHtml(title)}</h3>
+<body>
+${nav}
+<h3>${escapeHtml(title)}</h3>
 ${body}
 </body>
 </html>`;
@@ -54,19 +52,17 @@ export function redirectPage(url, msg = 'Please wait...') {
   return `<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<meta http-equiv="refresh" content="1;url=${u}">
-<title>Redirecting...</title>
+<meta http-equiv="refresh" content="0;url=${u}">
 </head>
-<body style="margin:0;padding:10px;font-family:sans-serif;font-size:14px;">
+<body>
 <p>${escapeHtml(msg)}</p>
-<p><a href="${u}">&gt;&gt; Continue</a></p>
+<p><a href="${u}">&gt; Continue</a></p>
 </body>
 </html>`;
 }
 
 export function errorPage(title, msg, backUrl = '/', session = null) {
-  const body = `<p>${escapeHtml(msg)}</p><p><a href="${escapeHtml(backUrl)}">&gt;&gt; Back</a></p>`;
+  const body = `<p>${escapeHtml(msg)}</p><p><a href="${escapeHtml(backUrl)}">&gt; Back</a></p>`;
   return page(title, body, session);
 }
 
@@ -81,11 +77,11 @@ export function selectField(name, options, selected) {
 
 export function renderGamesList(games) {
   if (!Array.isArray(games) || games.length === 0) return '';
-  let html = '<ul style="padding-left:18px;margin:6px 0;">';
+  let html = '<ul>';
   for (const g of games) {
     const opp = (g.opponent && (g.opponent.username || g.opponent.name)) || '?';
     const oppRating = g.opponent && g.opponent.rating ? ` (${g.opponent.rating})` : '';
-    const turn = g.isMyTurn ? ' <b>(your move)</b>' : '';
+    const turn = g.isMyTurn ? ' (your move)' : '';
     html += `<li><a href="/game/${escapeHtml(g.gameId)}">${escapeHtml(g.color || '?')} vs ${escapeHtml(opp)}${oppRating}</a> - ${escapeHtml(g.speed || '')}${turn}</li>`;
   }
   return html + '</ul>';

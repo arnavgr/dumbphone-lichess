@@ -2,14 +2,17 @@ import { Chess } from 'chess.js';
 
 // Board sizes. Widths include coordinate labels + 4px border:
 //   tiny ~116px (fits 128px-wide screens), small ~156px,
-//   normal ~220px (fits 240x320, default), large ~274px (fits 320px+).
+//   normal ~220px (fits 240x320, default).
+// NOTE: the old "large" size was removed - dumbphones don't come in larger
+// screen sizes. boardSizeSpec() falls back to "normal" for unknown names, so
+// a stale bsize=large cookie just becomes "normal".
 export const BOARD_SIZES = {
   tiny: { cell: 14, img: 12, coord: 0 },
   small: { cell: 17, img: 14, coord: 8 },
   normal: { cell: 24, img: 20, coord: 12 },
-  large: { cell: 30, img: 26, coord: 15 },
 };
-export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal', 'large'];
+export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal'];
+
 export function boardSizeSpec(name) {
   return BOARD_SIZES[name] || BOARD_SIZES.normal;
 }
@@ -19,11 +22,22 @@ const PIECE_FILES = {
   K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
   k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP',
 };
+const PIECE_NAMES = { K: 'king', Q: 'queen', R: 'rook', B: 'bishop', N: 'knight', P: 'pawn' };
 
-function pieceImg(code, img) {
+// Human-readable label like "white pawn e2". Dumbphone browsers use the img
+// alt text as the focus label; a distinct, descriptive label per piece/square
+// makes D-pad navigation far more reliable than a one-letter alt.
+function pieceAltText(code, square) {
+  const color = code === code.toUpperCase() ? 'white' : 'black';
+  const name = PIECE_NAMES[code.toUpperCase()] || 'piece';
+  return square ? `${color} ${name} ${square}` : `${color} ${name}`;
+}
+
+function pieceImg(code, img, alt) {
   const f = PIECE_FILES[code];
   if (!f) return '';
-  return `<img src="/images/${f}.png" width="${img}" height="${img}" alt="${code}" style="display:block;margin:auto;border:0;">`;
+  const a = alt || pieceAltText(code);
+  return `<img src="/images/${f}.png" width="${img}" height="${img}" alt="${a}" title="${a}" style="display:block;margin:auto;border:0;">`;
 }
 
 export function fenToPieceMap(fen) {
@@ -74,6 +88,14 @@ function lastMoveSquares(lastMove) {
 
 // opts: size, interactive, selected, lastMove (uci string), selectHref(sq),
 // moveHref(uci), isOwnPiece(sq,piece)
+//
+// Dumbphone-focus hardening:
+//   - the table gets id="board" and every square gets id="sq-<square>" so a
+//     redirect can end in #sq-e4 / #board and the browser stays on the board
+//     after a reload instead of jumping to the top of the page;
+//   - every cell has explicit width/height so a slow/failed image load can
+//     never collapse a square and make that piece unfocusable;
+//   - piece images carry descriptive alt/title text.
 export function renderBoard(fen, orientation = 'white', opts = {}) {
   const { interactive = false, selected = null, selectHref, moveHref, isOwnPiece, lastMove } = opts;
   const spec = boardSizeSpec(opts.size);
@@ -87,7 +109,6 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
   const ranksTopDown = orientation === 'black' ? [1, 2, 3, 4, 5, 6, 7, 8] : [8, 7, 6, 5, 4, 3, 2, 1];
   const filesOrder = orientation === 'black' ? [...FILES].reverse() : FILES;
   const coordStyle = `background:#ccc;font-size:${Math.max(7, COORD - 2)}px;text-align:center;vertical-align:middle;`;
-
   const fileRow = () => {
     if (!showCoords) return '';
     let row = `<tr><td style="${coordStyle}width:${COORD}px;height:${COORD}px;"></td>`;
@@ -95,8 +116,7 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
     row += `<td style="${coordStyle}width:${COORD}px;height:${COORD}px;"></td></tr>`;
     return row;
   };
-
-  let html = '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:4px auto;border:2px solid #333;">';
+  let html = '<table id="board" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:4px auto;border:2px solid #333;">';
   html += fileRow();
   for (const rank of ranksTopDown) {
     html += showCoords ? `<tr><td style="${coordStyle}width:${COORD}px;">${rank}</td>` : '<tr>';
@@ -110,17 +130,17 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
       if (selected === square) bg = '#ffed4a';
       else if (uci) bg = '#7bde7b';
       else if (lastSquares.includes(square)) bg = isLight ? '#cdeaa8' : '#a3cf7d';
-      let inner = piece ? pieceImg(piece, IMG) : `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
+      let inner = piece ? pieceImg(piece, IMG, pieceAltText(piece, square)) : `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
       if (uci && moveHref) {
         const dot = Math.max(4, Math.floor(IMG / 2));
         const targetContent = piece
-          ? pieceImg(piece, IMG)
+          ? pieceImg(piece, IMG, pieceAltText(piece, square))
           : `<div style="width:${dot}px;height:${dot}px;background:#333;margin:auto;"></div>`;
         inner = `<a href="${moveHref(uci)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${targetContent}</a>`;
       } else if (interactive && piece && typeof isOwnPiece === 'function' && isOwnPiece(square, piece) && selectHref) {
-        inner = `<a href="${selectHref(square)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${pieceImg(piece, IMG)}</a>`;
+        inner = `<a href="${selectHref(square)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${pieceImg(piece, IMG, pieceAltText(piece, square))}</a>`;
       }
-      html += `<td width="${CELL}" height="${CELL}" style="width:${CELL}px;height:${CELL}px;min-width:${CELL}px;min-height:${CELL}px;padding:0;text-align:center;vertical-align:middle;background-color:${bg};border:1px solid #666;">${inner}</td>`;
+      html += `<td id="sq-${square}" width="${CELL}" height="${CELL}" style="width:${CELL}px;height:${CELL}px;min-width:${CELL}px;min-height:${CELL}px;padding:0;text-align:center;vertical-align:middle;background-color:${bg};border:1px solid #666;">${inner}</td>`;
     }
     html += showCoords ? `<td style="${coordStyle}width:${COORD}px;">${rank}</td></tr>` : '</tr>';
   }
@@ -150,12 +170,12 @@ function pgnToVerboseMoves(pgn) {
     // fall through to manual parser
   }
   const tokens = text
-    .replace(/\{[^}]*\}/g, ' ')
+    .replace(/{[^}]*}/g, ' ')
     .replace(/\$\d+/g, ' ')
-    .replace(/\d+\.{1,3}/g, ' ')
+    .replace(/\d+\.(\.\.)?/g, ' ')
     .replace(/1-0|0-1|1\/2-1\/2|\*/g, ' ')
     .split(/\s+/)
-    .filter((t) => t && !/^\.\.?$/.test(t));
+    .filter((t) => t && !/^\d+$/.test(t));
   const tmp = new Chess();
   const out = [];
   for (const t of tokens) {
@@ -208,8 +228,8 @@ export function puzzleBasePosition(puzzle) {
     if (!Number.isFinite(claimed) && fits(d)) return { fen: fens[d], plyUsed: d };
   }
   throw new Error(
-    `Could not locate the puzzle position: initialPly=${JSON.stringify(puzzle.puzzle.initialPly)}, ` +
-      `parsed ${moves.length} plies, first solution move ${solution[0]}.`
+    `Could not locate the puzzle position: initialPly=${JSON.stringify(puzzle.puzzle.initialPly)},` +
+    `parsed ${moves.length} plies, first solution move ${solution[0]}.`
   );
 }
 

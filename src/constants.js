@@ -13,6 +13,21 @@ export function findTimeControl(value) {
   return TIME_CONTROLS.find((t) => t.value === value) || TIME_CONTROLS[0];
 }
 
+// Time controls offered for Lichess-hosted AI games only. Adds an
+// "Unlimited (no timer)" option on top of the standard clocks. Unlimited is
+// expressed as clock: null, which makes timeControlParams() omit
+// clock.limit/clock.increment - Lichess then creates the AI game with no
+// clock. It is NOT in the shared TIME_CONTROLS list because quick pair and
+// challenges need a real clock to matchmake.
+export const AI_TIME_CONTROLS = [
+  { value: 'unlimited', label: 'Unlimited (no timer)', clock: null },
+  ...TIME_CONTROLS,
+];
+
+export function findAiTimeControl(value) {
+  return AI_TIME_CONTROLS.find((t) => t.value === value) || AI_TIME_CONTROLS[0];
+}
+
 // Lichess-hosted AI (its own Stockfish), levels 1-8.
 export const AI_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8];
 
