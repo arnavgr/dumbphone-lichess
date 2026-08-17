@@ -1,6 +1,4 @@
-// Standard chess only, Rapid/Classical only. These are the two speeds that
-// work across every Lichess path used here (AI games, challenges, and the
-// real matchmaking pool used by quick pair).
+// Standard chess only, Rapid/Classical only.
 export const TIME_CONTROLS = [
   { value: 'rapid-600-0', label: 'Rapid 10+0', clock: { limit: 600, increment: 0 } },
   { value: 'rapid-600-5', label: 'Rapid 10+5', clock: { limit: 600, increment: 5 } },
@@ -13,10 +11,18 @@ export function findTimeControl(value) {
   return TIME_CONTROLS.find((t) => t.value === value) || TIME_CONTROLS[0];
 }
 
-// Lichess-hosted AI (its own Stockfish), levels 1-8.
+// AI games get an "Unlimited" option. clock: null means no clock params are sent.
+export const AI_TIME_CONTROLS = [
+  { value: 'unlimited', label: 'Unlimited (no timer)', clock: null },
+  ...TIME_CONTROLS,
+];
+
+export function findAiTimeControl(value) {
+  return AI_TIME_CONTROLS.find((t) => t.value === value) || AI_TIME_CONTROLS[0];
+}
+
 export const AI_LEVELS = [1, 2, 3, 4, 5, 6, 7, 8];
 
-// Anonymous local AI mode difficulty (a different engine path, see chess.js).
 export const LOCAL_AI_LEVELS = [
   { value: 0, label: '0 - Random moves' },
   { value: 1, label: '1 - Easy' },
