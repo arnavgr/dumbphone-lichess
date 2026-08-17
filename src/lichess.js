@@ -1,5 +1,4 @@
 // PKCE helpers, KV-backed sessions, and the lichess.org API wrapper.
-
 function base64url(buffer) {
   const bytes = new Uint8Array(buffer);
   let str = '';
@@ -162,8 +161,42 @@ export const boardMove = (token, gameId, move) =>
 export const boardResign = (token, gameId) =>
   lpostEmpty(token, `/api/board/game/${gameId}/resign`);
 
-// Join the matchmaking pool. Holds the connection until matched or timeout;
-// watches the stream for the {"game":{...}} event so we can return early.
+// Read ONLY the first event of a board game's state stream, then disconnect.
+// That first event carries the current position, status and BOTH players'
+// clocks (wtime/btime in milliseconds). /api/account/playing only exposes
+// your own secondsLeft, so this is how we get the opponent's timer. Best
+// effort: returns null if the game isn't a board game / stream can't be read.
+export async function boardGameState(token, gameId, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${BASE}/api/board/game/${gameId}/state`, {
+      headers: authHeaders(token),
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) return null;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return null;
+      buf += decoder.decode(value, { stream: true });
+      const nl = buf.indexOf('\n');
+      if (nl === -1) continue;
+      const line = buf.slice(0, nl).trim();
+      if (!line) return null;
+      return JSON.parse(line);
+    }
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    try { controller.abort(); } catch {}
+  }
+}
+
+// Join the matchmaking pool. Holds the connection until matched or timeout.
 export async function quickPairSeek(token, params, timeoutMs = 20000) {
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -187,7 +220,6 @@ export async function quickPairSeek(token, params, timeoutMs = 20000) {
       const decoder = new TextDecoder();
       let buf = '';
       try {
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -227,16 +259,5 @@ export const challengeCancel = (token, challengeId) =>
 export const puzzleDaily = () => lget(null, '/api/puzzle/daily');
 export const puzzleNext = (token) => lget(token, '/api/puzzle/next');
 export const puzzleById = (token, id) => lget(token, `/api/puzzle/${id}`);
-// A batch of several *distinct* puzzle ids in one call. Works with or
-// without a token (anonymous callers just get generic puzzles; logged-in
-// callers get puzzles Lichess hasn't shown them before). `angle` is a
-// theme filter - 'mix' is Lichess's own recommended value for "any theme".
-//
-// NOTE: earlier versions of this file called `/api/puzzle/streak` and
-// `/api/puzzle/daily/{days}` here, neither of which is a real Lichess API
-// endpoint (verified against lichess-org/api's published OpenAPI spec).
-// Both calls were silently failing and falling back to `puzzleDaily()` /
-// `puzzleNext()`, which is why "next puzzle" kept showing the exact same
-// puzzle - see the comment above the `/puzzle` route in src/index.js.
 export const puzzleBatch = (token, angle, nb) =>
   lget(token, `/api/puzzle/batch/${encodeURIComponent(angle)}?nb=${encodeURIComponent(nb)}`);

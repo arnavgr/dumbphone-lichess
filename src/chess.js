@@ -2,16 +2,14 @@ import { Chess } from 'chess.js';
 
 // Board sizes. Widths include coordinate labels + 4px border:
 //   tiny ~116px (fits 128px-wide screens), small ~156px,
-//   normal ~220px (fits 240x320, default).
-// NOTE: the old "large" size was removed - dumbphones don't come in larger
-// screen sizes. boardSizeSpec() falls back to "normal" for unknown names, so
-// a stale bsize=large cookie just becomes "normal".
+//   normal ~220px (fits 240x320, default), large ~274px (fits 320px+).
 export const BOARD_SIZES = {
   tiny: { cell: 14, img: 12, coord: 0 },
   small: { cell: 17, img: 14, coord: 8 },
   normal: { cell: 24, img: 20, coord: 12 },
+  large: { cell: 30, img: 26, coord: 15 },
 };
-export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal'];
+export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal', 'large'];
 
 export function boardSizeSpec(name) {
   return BOARD_SIZES[name] || BOARD_SIZES.normal;
@@ -22,22 +20,11 @@ const PIECE_FILES = {
   K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
   k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP',
 };
-const PIECE_NAMES = { K: 'king', Q: 'queen', R: 'rook', B: 'bishop', N: 'knight', P: 'pawn' };
 
-// Human-readable label like "white pawn e2". Dumbphone browsers use the img
-// alt text as the focus label; a distinct, descriptive label per piece/square
-// makes D-pad navigation far more reliable than a one-letter alt.
-function pieceAltText(code, square) {
-  const color = code === code.toUpperCase() ? 'white' : 'black';
-  const name = PIECE_NAMES[code.toUpperCase()] || 'piece';
-  return square ? `${color} ${name} ${square}` : `${color} ${name}`;
-}
-
-function pieceImg(code, img, alt) {
+function pieceImg(code, img) {
   const f = PIECE_FILES[code];
   if (!f) return '';
-  const a = alt || pieceAltText(code);
-  return `<img src="/images/${f}.png" width="${img}" height="${img}" alt="${a}" title="${a}" style="display:block;margin:auto;border:0;">`;
+  return `<img src="/images/${f}.png" width="${img}" height="${img}" alt="${code}" style="display:block;margin:auto;border:0;">`;
 }
 
 export function fenToPieceMap(fen) {
@@ -75,8 +62,6 @@ function legalMovesFrom(fen, square) {
   }
 }
 
-// Squares touched by the last move played, as a UCI string (e.g. "e2e4"
-// or "e7e8q"). Returns [] if there's nothing to highlight.
 function lastMoveSquares(lastMove) {
   const uci = String(lastMove || '').toLowerCase();
   if (uci.length < 4) return [];
@@ -89,13 +74,9 @@ function lastMoveSquares(lastMove) {
 // opts: size, interactive, selected, lastMove (uci string), selectHref(sq),
 // moveHref(uci), isOwnPiece(sq,piece)
 //
-// Dumbphone-focus hardening:
-//   - the table gets id="board" and every square gets id="sq-<square>" so a
-//     redirect can end in #sq-e4 / #board and the browser stays on the board
-//     after a reload instead of jumping to the top of the page;
-//   - every cell has explicit width/height so a slow/failed image load can
-//     never collapse a square and make that piece unfocusable;
-//   - piece images carry descriptive alt/title text.
+// Every square gets id="sq-<square>" and the table gets id="board" so a page
+// can land on a URL fragment (#sq-e4 / #board) and the browser scrolls
+// straight to the board / moved piece instead of the top of the page.
 export function renderBoard(fen, orientation = 'white', opts = {}) {
   const { interactive = false, selected = null, selectHref, moveHref, isOwnPiece, lastMove } = opts;
   const spec = boardSizeSpec(opts.size);
@@ -130,15 +111,15 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
       if (selected === square) bg = '#ffed4a';
       else if (uci) bg = '#7bde7b';
       else if (lastSquares.includes(square)) bg = isLight ? '#cdeaa8' : '#a3cf7d';
-      let inner = piece ? pieceImg(piece, IMG, pieceAltText(piece, square)) : `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
+      let inner = piece ? pieceImg(piece, IMG) : `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
       if (uci && moveHref) {
         const dot = Math.max(4, Math.floor(IMG / 2));
         const targetContent = piece
-          ? pieceImg(piece, IMG, pieceAltText(piece, square))
+          ? pieceImg(piece, IMG)
           : `<div style="width:${dot}px;height:${dot}px;background:#333;margin:auto;"></div>`;
         inner = `<a href="${moveHref(uci)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${targetContent}</a>`;
       } else if (interactive && piece && typeof isOwnPiece === 'function' && isOwnPiece(square, piece) && selectHref) {
-        inner = `<a href="${selectHref(square)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${pieceImg(piece, IMG, pieceAltText(piece, square))}</a>`;
+        inner = `<a href="${selectHref(square)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${pieceImg(piece, IMG)}</a>`;
       }
       html += `<td id="sq-${square}" width="${CELL}" height="${CELL}" style="width:${CELL}px;height:${CELL}px;min-width:${CELL}px;min-height:${CELL}px;padding:0;text-align:center;vertical-align:middle;background-color:${bg};border:1px solid #666;">${inner}</td>`;
     }
@@ -153,8 +134,7 @@ export function sideToMove(fen) {
   return fen.split(' ')[1] === 'w' ? 'white' : 'black';
 }
 
-// ---- Puzzle logic (self-healing: validates the derived position and, if it
-// doesn't fit the solution, searches nearby plies) ----
+// ---- Puzzle logic (self-healing) ----
 export function normalizeUci(move) {
   return String(move || '').trim().toLowerCase().replace(/[^a-h1-8qrbn]/g, '');
 }
@@ -294,11 +274,6 @@ export async function pickAiMove(chess, diff) {
   return randomLegalMove(chess);
 }
 
-// Returns the move actually played (which may be a random fallback, not
-// the requested `move`, if that move turned out illegal) - or null if
-// nothing could be played. Callers that want to display/highlight the
-// move that was made (e.g. a "last move" indicator) should use this
-// return value rather than assuming `move` itself was applied.
 export function applyAiMove(chess, move) {
   if (!move) return null;
   try {

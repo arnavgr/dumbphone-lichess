@@ -1,8 +1,7 @@
 // Plain-HTML helpers. No client JS anywhere - dumbphone browsers may not run
 // it. htmlResponse() is the SINGLE place HTML becomes an HTTP response:
 //   - extra headers (Set-Cookie!) MUST be passed INTO it. Hono does not merge
-//     c.header() onto a raw Response you return yourself - that is what
-//     silently dropped the login cookie before.
+//     c.header() onto a raw Response you return yourself.
 //   - every response is Cache-Control: no-store, so Opera Mini's proxy never
 //     serves a stale board or replays an old move/puzzle link.
 export function escapeHtml(s) {
@@ -82,7 +81,7 @@ export function renderGamesList(games) {
     const opp = (g.opponent && (g.opponent.username || g.opponent.name)) || '?';
     const oppRating = g.opponent && g.opponent.rating ? ` (${g.opponent.rating})` : '';
     const turn = g.isMyTurn ? ' (your move)' : '';
-    html += `<li><a href="/game/${escapeHtml(g.gameId)}">${escapeHtml(g.color || '?')} vs ${escapeHtml(opp)}${oppRating}</a> - ${escapeHtml(g.speed || '')}${turn}</li>`;
+    html += `<li><a href="/game/${escapeHtml(g.gameId)}#board">${escapeHtml(g.color || '?')} vs ${escapeHtml(opp)}${oppRating}</a> - ${escapeHtml(g.speed || '')}${turn}</li>`;
   }
   return html + '</ul>';
 }
