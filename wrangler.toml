@@ -8,6 +8,19 @@ kv_namespaces = [
   { binding = "KV", id = "eff4a59826bc447ab730870146869d59" }
 ]
 
+# Durable Object that holds a live connection to a Lichess game's Board API
+# stream so Lichess doesn't think we've disconnected between page loads
+# (see GameWatcher in src/lichess.js, re-exported from src/index.js). Unlike
+# the KV namespace above, this needs no manual dashboard setup - the
+# [[migrations]] block below registers the class automatically on deploy.
+[[durable_objects.bindings]]
+name = "GAME_WATCHER"
+class_name = "GameWatcher"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameWatcher"]
+
 # Static assets (the chess piece icons the board renders as /images/*.png).
 # Cloudflare serves any request that matches a file in this directory
 # directly, without invoking the Worker - so this doesn't cost a request

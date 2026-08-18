@@ -166,6 +166,10 @@ export const boardResign = (token, gameId) =>
 // clocks (wtime/btime in milliseconds). /api/account/playing only exposes
 // your own secondsLeft, so this is how we get the opponent's timer. Best
 // effort: returns null if the game isn't a board game / stream can't be read.
+//
+// NOTE: this is now mostly a fallback. GameWatcher (below) keeps a stream
+// open continuously and has fresher data - this one-shot read only gets used
+// on /game/:id when the watcher hasn't received anything yet.
 export async function boardGameState(token, gameId, timeoutMs = 5000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -261,3 +265,135 @@ export const puzzleNext = (token) => lget(token, '/api/puzzle/next');
 export const puzzleById = (token, id) => lget(token, `/api/puzzle/${id}`);
 export const puzzleBatch = (token, angle, nb) =>
   lget(token, `/api/puzzle/batch/${encodeURIComponent(angle)}?nb=${encodeURIComponent(nb)}`);
+
+// ---------------------------------------------------------------------
+// GameWatcher (Durable Object)
+//
+// WHY THIS EXISTS: Lichess treats "connected to the Board API's game
+// stream" (GET /api/board/game/stream/{id}) as your presence at the
+// board - it's how every real Board API client (bots, DGT boards, etc.)
+// proves it's still there. This app renders a page and closes the
+// connection, so without this object, Lichess sees us connect for an
+// instant on every page load and then vanish - and starts its "opponent
+// left" abort countdown the moment each page finishes rendering.
+//
+// This object holds that stream connection open for the lifetime of a
+// game, independent of whether/when the phone happens to load a page,
+// and caches the latest position/clocks/status so page renders can read
+// them without hitting Lichess fresh each time. A watchdog alarm re-checks
+// every few seconds and reconnects if the stream has gone quiet, so a
+// dropped connection gets re-established well within the window Lichess
+// allows before flagging us as gone.
+const TERMINAL_STATUSES = new Set([
+  'mate', 'resign', 'stalemate', 'timeout', 'draw',
+  'outoftime', 'cheat', 'noStart', 'aborted', 'variantEnd',
+]);
+const STALE_MS = 8000; // if we've heard nothing in 8s, assume the connection died
+const WATCHDOG_MS = 5000; // check that often - comfortably under Lichess's ~10-20s window
+
+export class GameWatcher {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.running = false;
+    this.generation = 0;
+    this.lastHeardAt = 0;
+    this.latest = null;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/start' && request.method === 'POST') {
+      const { token, gameId } = await request.json();
+      this.token = token;
+      this.gameId = gameId;
+      if (!this.running) {
+        this.running = true;
+        this.connect(); // not awaited - the DO stays alive while this has pending I/O
+        await this.state.storage.setAlarm(Date.now() + WATCHDOG_MS);
+      }
+      return new Response('ok');
+    }
+
+    if (url.pathname === '/stop' && request.method === 'POST') {
+      this.running = false;
+      this.generation++; // retires any in-flight read loop
+      return new Response('ok');
+    }
+
+    if (url.pathname === '/state') {
+      return new Response(JSON.stringify(this.latest || {}), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response('not found', { status: 404 });
+  }
+
+  // Called by the Cloudflare runtime when the alarm set above fires.
+  async alarm() {
+    if (!this.running) return;
+    if (Date.now() - this.lastHeardAt > STALE_MS) this.connect();
+    await this.state.storage.setAlarm(Date.now() + WATCHDOG_MS);
+  }
+
+  async connect() {
+    if (!this.token || !this.gameId) return;
+    const gen = ++this.generation; // if an older loop is still winding down, this retires it
+    this.lastHeardAt = Date.now();
+    try {
+      const res = await fetch(`${BASE}/api/board/game/stream/${this.gameId}`, {
+        headers: authHeaders(this.token),
+      });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (this.running && gen === this.generation) {
+        const { done, value } = await reader.read();
+        this.lastHeardAt = Date.now(); // any byte counts, including keep-alive blank lines
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (line) this.handleLine(line);
+        }
+        if (this.latest && TERMINAL_STATUSES.has(this.latest.status)) {
+          this.running = false;
+        }
+      }
+    } catch {
+      // dropped mid-stream - the watchdog alarm will notice lastHeardAt
+      // going stale and call connect() again.
+    }
+  }
+
+  handleLine(line) {
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (evt.type === 'gameFull') {
+      this.latest = {
+        ...(this.latest || {}),
+        ...evt.state,
+        white: evt.white,
+        black: evt.black,
+        initialFen: evt.initialFen,
+      };
+    } else if (evt.type === 'gameState') {
+      this.latest = { ...(this.latest || {}), ...evt };
+    } else if (evt.type === 'opponentGone') {
+      this.latest = {
+        ...(this.latest || {}),
+        opponentGone: evt.gone,
+        claimWinInSeconds: evt.claimWinInSeconds,
+      };
+    }
+  }
+}

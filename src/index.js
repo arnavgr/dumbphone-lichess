@@ -6,11 +6,19 @@ import {
 } from './lichess.js';
 import * as lichess from './lichess.js';
 import {
-  renderBoard, sideToMove, puzzleBasePosition, puzzleStateFrom, normalizeUci,
+  renderBoard, sideToMove, puzzleBasePosition, puzzleStateFrom, normalizeUci, applyUciMoves,
   pickAiMove, applyAiMove, BOARD_SIZE_KEYS,
 } from './chess.js';
 import { page, redirectPage, errorPage, htmlResponse, escapeHtml, selectField, renderGamesList } from './ui.js';
 import { TIME_CONTROLS, findTimeControl, AI_TIME_CONTROLS, findAiTimeControl, AI_LEVELS, LOCAL_AI_LEVELS } from './constants.js';
+
+// GameWatcher is a Durable Object (defined in lichess.js, since it's really
+// just another piece of "talk to the Lichess API" logic) that keeps a
+// Board API game-stream connection open for the life of a game, so Lichess
+// doesn't think we've disconnected between page loads. Cloudflare requires
+// the class to be exported from this file (the `main` entry in
+// wrangler.toml) for the [[durable_objects.bindings]] binding to find it.
+export { GameWatcher } from './lichess.js';
 
 const app = new Hono();
 const UCI_MOVE_RE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
@@ -24,6 +32,42 @@ app.use('*', async (c, next) => {
 });
 
 const session = (c) => c.get('session') || null;
+
+// ---- Game-presence watcher (Durable Object) helpers ----
+function gameWatcherStub(env, gameId) {
+  return env.GAME_WATCHER.get(env.GAME_WATCHER.idFromName(gameId));
+}
+
+// Idempotent - safe to call on every page load for a game. Tells the
+// GameWatcher Durable Object to (keep) holding the Board API stream open
+// for this game so Lichess sees us as continuously present. Best-effort:
+// a failure here shouldn't break page rendering.
+async function startWatching(c, gameId) {
+  const s = session(c);
+  if (!s || !s.accessToken) return;
+  try {
+    await gameWatcherStub(c.env, gameId).fetch('https://do/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: s.accessToken, gameId }),
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+async function stopWatching(c, gameId) {
+  try { await gameWatcherStub(c.env, gameId).fetch('https://do/stop', { method: 'POST' }); } catch {}
+}
+
+async function watcherState(c, gameId) {
+  try {
+    const res = await gameWatcherStub(c.env, gameId).fetch('https://do/state');
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
 
 function boardSize(c) {
   const v = parseCookies(c)['bsize'];
@@ -133,6 +177,11 @@ app.get('/', async (c) => {
     body += '<hr>';
   }
   if (nowPlaying.length > 0) {
+    // Make sure every active game has a watcher running - this is how we
+    // catch games that started some other way (e.g. accepted on
+    // lichess.org itself, or a challenge someone else accepted) without
+    // needing to have seen the exact moment they started.
+    for (const g of nowPlaying) await startWatching(c, g.gameId);
     const first = nowPlaying.find((g) => g.isMyTurn) || nowPlaying[0];
     const oppName = (first.opponent && first.opponent.username) || 'opponent';
     const oppRating = first.opponent && first.opponent.rating ? `(${first.opponent.rating})` : '';
@@ -260,6 +309,7 @@ app.post('/game/new/ai', async (c) => {
     const res = await lichess.challengeAI(s.accessToken, params);
     const gameId = (res.game && res.game.id) || res.id || (res.challenge && res.challenge.id);
     if (!gameId) throw new Error('Lichess did not return a game id.');
+    await startWatching(c, gameId);
     return htmlResponse(redirectPage(`/game/${gameId}#board`, 'Game created!'));
   } catch (e) { return htmlResponse(errorPage('Could not start game', e.message, '/game/new/ai')); }
 });
@@ -293,7 +343,10 @@ app.get('/searching', async (c) => {
   const selfUrl = `/searching?started=${started}&tc=${encodeURIComponent(tcValue)}&rated=${rated ? 'true' : 'false'}` + (excludeParam ? `&exclude=${encodeURIComponent(excludeParam)}` : '');
   let list = [], err = null; try { list = (await lichess.getPlaying(s.accessToken)).nowPlaying || []; } catch (e) { err = e.message; }
   const newGame = list.find((g) => !exclude.includes(g.gameId));
-  if (newGame) return htmlResponse(redirectPage(`/game/${newGame.gameId}#board`, 'Opponent found!'));
+  if (newGame) {
+    await startWatching(c, newGame.gameId);
+    return htmlResponse(redirectPage(`/game/${newGame.gameId}#board`, 'Opponent found!'));
+  }
   if (elapsed > 90) return htmlResponse(page('Quick pair', `<p>No opponent found within 90s.</p><p><a href="/game/new/multiplayer">Back</a></p>`, s));
   const body = `<p><b>Looking for ${rated ? 'RATED' : 'casual'} ${escapeHtml(tc.label)}... (${elapsed}s)</b></p><p><a href="${escapeHtml(selfUrl)}">Check now</a></p>${err ? `<p>${escapeHtml(err)}</p>` : ''}`;
   return htmlResponse(page('Searching', body, s, { refreshSeconds: 5 }));
@@ -329,7 +382,15 @@ app.get('/challenge/:id', async (c) => {
   if (!ch.status || ch.status === 'created' || ch.status === 'sent') body += `<form method="post" action="/challenge/${escapeHtml(id)}/cancel"><p><input type="submit" value="Cancel"></p></form>`;
   return htmlResponse(page('Challenge', body, s, { refreshSeconds: error ? undefined : 10 }));
 });
-app.post('/challenge/:id/accept', async (c) => { const s = session(c); if (!s) return htmlResponse(redirectPage('/login', 'Login.')); try { await lichess.challengeAccept(s.accessToken, c.req.param('id')); return htmlResponse(redirectPage(`/game/${c.req.param('id')}#board`, 'Accepted!')); } catch (e) { return htmlResponse(errorPage('Failed', e.message, '/')); } });
+app.post('/challenge/:id/accept', async (c) => {
+  const s = session(c); if (!s) return htmlResponse(redirectPage('/login', 'Login.'));
+  const id = c.req.param('id');
+  try {
+    await lichess.challengeAccept(s.accessToken, id);
+    await startWatching(c, id);
+    return htmlResponse(redirectPage(`/game/${id}#board`, 'Accepted!'));
+  } catch (e) { return htmlResponse(errorPage('Failed', e.message, '/')); }
+});
 app.post('/challenge/:id/decline', async (c) => { const s = session(c); if (!s) return htmlResponse(redirectPage('/login', 'Login.')); try { await lichess.challengeDecline(s.accessToken, c.req.param('id')); return htmlResponse(redirectPage('/', 'Declined.')); } catch (e) { return htmlResponse(errorPage('Failed', e.message, '/')); } });
 app.post('/challenge/:id/cancel', async (c) => { const s = session(c); if (!s) return htmlResponse(redirectPage('/login', 'Login.')); try { await lichess.challengeCancel(s.accessToken, c.req.param('id')); return htmlResponse(redirectPage('/', 'Cancelled.')); } catch (e) { return htmlResponse(errorPage('Failed', e.message, '/')); } });
 
@@ -409,6 +470,10 @@ app.get('/game/:id', async (c) => {
   
   let game = null, error = null;
   try { game = ((await lichess.getPlaying(s.accessToken)).nowPlaying || []).find((g) => g.gameId === id) || null; } catch (e) { error = e.message; }
+  // Make sure the watcher is running for this game on every load - it's
+  // idempotent, so this is cheap, and it's what keeps Lichess from thinking
+  // we've left between page loads.
+  if (game) await startWatching(c, id);
   
   // Parse move AFTER fetching game so we have the FEN for SAN parsing
   if (moveRaw && game) {
@@ -440,7 +505,24 @@ app.get('/game/:id', async (c) => {
     });
     body += `<p>You${myRatingStr} as <b>${escapeHtml(game.color)}</b> vs <b>${escapeHtml(opp.username || '?')}</b>${oppStr}</p>`;
     body += canMove ? '<p><b>Your move - tap a piece, or type e4/Nf3.</b></p>' : '<p>Waiting for opponent... (auto-refreshes)</p>';
-    if (typeof game.secondsLeft === 'number') { const m = Math.floor(game.secondsLeft / 60); const sec = game.secondsLeft % 60; body += `<p>Time left: ${m}m ${sec}s</p>`; }
+
+    if (typeof game.secondsLeft === 'number') {
+      const m = Math.floor(game.secondsLeft / 60); const sec = game.secondsLeft % 60;
+      body += `<p>Your time left: ${m}m ${sec}s</p>`;
+    }
+    // getPlaying() only exposes YOUR OWN secondsLeft, never the opponent's.
+    // The game watcher sees both sides' clocks on every Board API stream
+    // event, so ask it first; if it hasn't received anything yet (e.g. it
+    // only just started), fall back to a one-shot stream read.
+    let watch = await watcherState(c, id);
+    if (!watch || typeof watch.wtime !== 'number') {
+      try { watch = await lichess.boardGameState(s.accessToken, id); } catch { watch = null; }
+    }
+    if (watch && typeof watch.wtime === 'number' && typeof watch.btime === 'number') {
+      const oppMs = game.color === 'white' ? watch.btime : watch.wtime;
+      const om = Math.floor(oppMs / 60000), os = Math.floor((oppMs % 60000) / 1000);
+      body += `<p>Opponent time left: ${om}m ${os}s</p>`;
+    }
     
     body += `<p><a href="${refreshUrl}">Refresh board</a></p>`;
     if (canMove) {
@@ -488,7 +570,11 @@ app.post('/game/:id/move', async (c) => {
 app.post('/game/:id/resign', async (c) => {
   const s = session(c); if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
   const id = c.req.param('id');
-  try { await lichess.boardResign(s.accessToken, id); return htmlResponse(redirectPage('/', 'You resigned.')); } catch (e) { return htmlResponse(errorPage('Could not resign', e.message, `/game/${id}#board`), 200); }
+  try {
+    await lichess.boardResign(s.accessToken, id);
+    await stopWatching(c, id);
+    return htmlResponse(redirectPage('/', 'You resigned.'));
+  } catch (e) { return htmlResponse(errorPage('Could not resign', e.message, `/game/${id}#board`), 200); }
 });
 
 // ---------------------------------------------------------------- Puzzles
@@ -557,9 +643,18 @@ app.get('/puzzle/:id', async (c) => {
 app.post('/puzzle/:id', async (c) => {
   const s = session(c); const id = c.req.param('id'); const form = await c.req.parseBody(); const step = parseStep(form.step);
   let puzzle; try { puzzle = await lichess.puzzleById(s ? s.accessToken : null, id); } catch (e) { return htmlResponse(errorPage('Could not load puzzle', e.message, newPuzzleHref())); }
-  let solution; try { puzzleBasePosition(puzzle); solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci); } catch (e) { return htmlResponse(errorPage('Puzzle setup error', e.message, newPuzzleHref()), 500); }
+  // NOTE: this used to call `applyUciMoves(puzzleBasePosition(puzzle).fen, ...)`
+  // inline below without importing applyUciMoves at all, which threw a
+  // ReferenceError on every single "type a move" puzzle submission. Fixed by
+  // importing it above and computing the base position once here instead of
+  // twice.
+  let base, solution;
+  try {
+    base = puzzleBasePosition(puzzle);
+    solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci);
+  } catch (e) { return htmlResponse(errorPage('Puzzle setup error', e.message, newPuzzleHref()), 500); }
   
-  const guess = parseMoveInput(form.move, applyUciMoves(puzzleBasePosition(puzzle).fen, solution.slice(0, step)));
+  const guess = parseMoveInput(form.move, applyUciMoves(base.fen, solution.slice(0, step)));
   if (!guess) return htmlResponse(redirectPage(`/puzzle/${id}?step=${step}#board`, 'No move entered.'));
   const result = checkPuzzleGuess(solution, step, guess);
   if (result.correct) return htmlResponse(redirectPage(`/puzzle/${id}?step=${result.newStep}&msg=correct#sq-${toSquare(guess)}`, 'Correct!'));

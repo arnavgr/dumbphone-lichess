@@ -38,27 +38,63 @@ plain HTML rendered on the server by a Cloudflare Worker.
 
 ## How it's built
 
-- Cloudflare Worker, single `src/index.js` entry using [Hono](https://hono.dev)
-  for routing
+- Cloudflare Worker, `src/index.js` entry using [Hono](https://hono.dev) for
+  routing. The codebase is deliberately kept to five files under `src/`,
+  grouped by dependency rather than by feature, so there's less hunting
+  around when tracking down a bug:
+  - `src/index.js` - all routes/pages, ties everything together
+  - `src/lichess.js` - PKCE, KV-backed sessions, the lichess.org API
+    wrapper, and `GameWatcher` (a Durable Object - see below)
+  - `src/chess.js` - board rendering, puzzle replay/solving, and the local
+    (anonymous, no-login) AI opponent, all built on the `chess.js` library
+  - `src/ui.js` - shared HTML page shell and small render helpers
+  - `src/constants.js` - time control / AI level option lists
 - Cloudflare KV for OAuth/token login sessions (`KV` binding)
+- A Cloudflare Durable Object (`GAME_WATCHER` binding, class `GameWatcher`
+  in `src/lichess.js`) that keeps a live connection to a Lichess game so
+  the app doesn't get flagged as having "left" between page loads - see "A
+  note on staying connected" below. Unlike the KV namespace, this needs no
+  manual dashboard setup; `wrangler deploy` provisions it automatically
+  from the `[[migrations]]` block in `wrangler.toml`.
 - Cloudflare Workers static assets (`[assets]` in `wrangler.toml`) serve the
   chess piece icons from `public/images/*.png`
 - [`chess.js`](https://github.com/jhlywa/chess.js) is used **only inside the
-  Worker**, never shipped to the phone:
-  - `src/puzzle.js` - replays puzzle PGNs into FEN positions
-  - `src/board.js` - computes legal destination squares for the tap-to-move
-    board's highlighting (best-effort on non-standard variants - the real
-    legality check always happens server-side, either by chess.js itself
-    for the anonymous AI mode, or by Lichess when a move is submitted to a
-    real game, so an imperfect highlight never lets an illegal move through)
-  - `src/localAi.js` - runs the entire anonymous vs-AI mode: legality,
-    check/checkmate/draw detection, all local, no Lichess API call anywhere
-    in that file
+  Worker**, never shipped to the phone - all legality/checkmate/draw
+  detection for the local AI mode happens server-side, and the tap-to-move
+  board's highlighting is best-effort on non-standard variants (the real
+  legality check always happens either by chess.js itself for the
+  anonymous AI mode, or by Lichess when a move is submitted to a real
+  game, so an imperfect highlight never lets an illegal move through)
 - Talks directly to `https://lichess.org/api` for everything login-required
   - see [lichess.org/api](https://lichess.org/api) for the full reference
 - Talks to `https://chess-api.com` (a free third-party service, not
   affiliated with Lichess or this project) for the anonymous AI mode's
   moves at difficulty 1-4
+
+### A note on staying connected (Board API presence)
+
+Lichess treats a Board API client as "at the board" only while it's
+connected to that game's stream (`GET /api/board/game/stream/{id}`) - it's
+how bots and other real Board API clients prove they're still there. A
+plain request/response page-load app is never connected long enough to
+count, so without anything else, Lichess would start its "opponent left"
+countdown the instant every page finishes rendering.
+
+`GameWatcher` exists to fix that: it's a small Durable Object, one instance
+per active game, that holds that stream connection open independently of
+whether or when your phone happens to load a page, and caches the latest
+position/clocks/status so page renders can read them without an extra
+round trip to Lichess. A watchdog alarm re-checks every few seconds and
+reconnects if the stream's gone quiet, so a dropped connection gets
+re-established well before Lichess would flag it. It's started (or
+re-confirmed, which is a no-op if it's already running) whenever a game is
+created, a challenge is accepted, quick pair finds a match, or a
+game page is loaded - so it should self-heal even for games that started
+some other way (e.g. a challenge accepted from lichess.org itself).
+
+The same object is also how `/game/:id` shows the opponent's clock:
+`/api/account/playing` only ever exposes *your own* remaining time, but
+every Board API stream event carries both sides' clocks.
 
 ### A note on the Board API's limits (not a limitation of this app)
 
@@ -94,6 +130,9 @@ context, and explains why Bullet/Blitz are missing where relevant.
      path; the paste-a-token login path doesn't use it.
    - You'll fix `REDIRECT_URI` in step 6, after your first deploy (you need
      to know your `workers.dev` URL first).
+   - Leave the `[[durable_objects.bindings]]` and `[[migrations]]` blocks
+     alone - unlike the KV namespace, there's no ID to create by hand;
+     `wrangler deploy` sets the Durable Object up on its own.
 
 4. **Add your piece icons.** Put 12 PNGs in `public/images/`, named exactly
    `wK.png`, `wQ.png`, `wR.png`, `wB.png`, `wN.png`, `wP.png`, `bK.png`,
@@ -170,11 +209,17 @@ it's worth double-checking these against the real APIs once deployed:
 
 - Exact JSON field names in `/api/account/playing`, `/api/challenge/ai`,
   `/api/challenge/open`, and `/api/puzzle/*` responses (see
-  `src/lichessApi.js` if anything's drifted from lichess.org/api)
+  `src/lichess.js` if anything's drifted from lichess.org/api)
 - Exact response shape from `chess-api.com`'s `/v1` endpoint (see
-  `src/localAi.js`'s `fetchRemoteAiMove` if the AI seems to always be
+  `src/chess.js`'s `fetchRemoteAiMove` if the AI seems to always be
   falling back to random moves - that means the response parsing needs
   adjusting, not that anything is broken)
+- **`GameWatcher`** (`src/lichess.js`): written against the published Board
+  API stream docs but never exercised against a live game from this
+  sandbox. After deploy, worth confirming it actually keeps a rated game
+  from getting auto-aborted if you leave a game page open/idle for a few
+  minutes, and that the opponent's clock on `/game/:id` shows up and
+  updates correctly across a few real moves.
 - Whether `https://lichess.org/account/oauth/token/create?scopes[]=...`
   actually pre-checks the boxes as expected - if Lichess changes that
   page's query-param handling, the link in `/login` will just open a blank
