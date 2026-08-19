@@ -9,6 +9,7 @@ export const BOARD_SIZES = {
   normal: { cell: 24, img: 20, coord: 12 },
   large: { cell: 30, img: 26, coord: 15 },
 };
+
 export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal', 'large'];
 
 export function boardSizeSpec(name) {
@@ -16,6 +17,7 @@ export function boardSizeSpec(name) {
 }
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+
 const PIECE_FILES = {
   K: 'wK', Q: 'wQ', R: 'wR', B: 'wB', N: 'wN', P: 'wP',
   k: 'bK', q: 'bQ', r: 'bR', b: 'bB', n: 'bN', p: 'bP',
@@ -77,6 +79,8 @@ function lastMoveSquares(lastMove) {
 // Every square gets id="sq-<square>" and the table gets id="board" so a page
 // can land on a URL fragment (#sq-e4 / #board) and the browser scrolls
 // straight to the board / moved piece instead of the top of the page.
+// Squares that aren't links also carry an old-school <a name="..."> anchor
+// as a fallback for very old browsers that don't scroll to id= attributes.
 export function renderBoard(fen, orientation = 'white', opts = {}) {
   const { interactive = false, selected = null, selectHref, moveHref, isOwnPiece, lastMove } = opts;
   const spec = boardSizeSpec(opts.size);
@@ -97,7 +101,7 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
     row += `<td style="${coordStyle}width:${COORD}px;height:${COORD}px;"></td></tr>`;
     return row;
   };
-  let html = '<table id="board" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:4px auto;border:2px solid #333;">';
+  let html = `<a name="board"></a><table id="board" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:4px auto;border:2px solid #333;">`;
   html += fileRow();
   for (const rank of ranksTopDown) {
     html += showCoords ? `<tr><td style="${coordStyle}width:${COORD}px;">${rank}</td>` : '<tr>';
@@ -112,6 +116,7 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
       else if (uci) bg = '#7bde7b';
       else if (lastSquares.includes(square)) bg = isLight ? '#cdeaa8' : '#a3cf7d';
       let inner = piece ? pieceImg(piece, IMG) : `<div style="width:${CELL}px;height:${CELL}px;"></div>`;
+      let anchor = '';
       if (uci && moveHref) {
         const dot = Math.max(4, Math.floor(IMG / 2));
         const targetContent = piece
@@ -120,8 +125,11 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
         inner = `<a href="${moveHref(uci)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${targetContent}</a>`;
       } else if (interactive && piece && typeof isOwnPiece === 'function' && isOwnPiece(square, piece) && selectHref) {
         inner = `<a href="${selectHref(square)}" style="display:block;width:${CELL}px;height:${CELL}px;text-decoration:none;">${pieceImg(piece, IMG)}</a>`;
+      } else {
+        // Not a link, so it's safe (and useful) to add a named anchor here.
+        anchor = `<a name="sq-${square}"></a>`;
       }
-      html += `<td id="sq-${square}" width="${CELL}" height="${CELL}" style="width:${CELL}px;height:${CELL}px;min-width:${CELL}px;min-height:${CELL}px;padding:0;text-align:center;vertical-align:middle;background-color:${bg};border:1px solid #666;">${inner}</td>`;
+      html += `<td id="sq-${square}" width="${CELL}" height="${CELL}" style="width:${CELL}px;height:${CELL}px;min-width:${CELL}px;min-height:${CELL}px;padding:0;text-align:center;vertical-align:middle;background-color:${bg};border:1px solid #666;">${anchor}${inner}</td>`;
     }
     html += showCoords ? `<td style="${coordStyle}width:${COORD}px;">${rank}</td></tr>` : '</tr>';
   }
@@ -135,6 +143,7 @@ export function sideToMove(fen) {
 }
 
 // ---- Puzzle logic (self-healing) ----
+
 export function normalizeUci(move) {
   return String(move || '').trim().toLowerCase().replace(/[^a-h1-8qrbn]/g, '');
 }
@@ -152,7 +161,7 @@ function pgnToVerboseMoves(pgn) {
   const tokens = text
     .replace(/{[^}]*}/g, ' ')
     .replace(/\$\d+/g, ' ')
-    .replace(/\d+\.(\.\.)?/g, ' ')
+    .replace(/\d+\.(?:\.\.)?/g, ' ')
     .replace(/1-0|0-1|1\/2-1\/2|\*/g, ' ')
     .split(/\s+/)
     .filter((t) => t && !/^\d+$/.test(t));
@@ -229,6 +238,7 @@ export function puzzleStateFrom(baseFen, solution, step) {
 }
 
 // ---- Local AI opponent (anonymous mode) ----
+
 const REMOTE_DEPTH = { 1: 2, 2: 5, 3: 10, 4: 18 };
 const REMOTE_TIMEOUT_MS = 8000;
 
