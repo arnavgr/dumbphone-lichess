@@ -79,15 +79,14 @@ function boardSize(c) {
 const newPuzzleHref = () => `/puzzle?r=${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
 const toSquare = (uci) => String(uci || '').slice(2, 4);
 
-// Clock formatting helpers for the player bars above/below the board.
+// Clock formatting for the multiplayer player bars above/below the board.
 function fmtClockSec(totalSeconds) {
   const t = Math.max(0, Math.floor(Number(totalSeconds) || 0));
   return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
 }
 const fmtClockMs = (ms) => fmtClockSec(ms / 1000);
 
-// NEW: Parses both UCI (e2e4) and SAN (e4, Nf3, O-O, e8=Q).
-// This allows users to type standard chess notation in the move box!
+// Parses both UCI (e2e4) and SAN (e4, Nf3, O-O, e8=Q).
 function parseMoveInput(input, fen) {
   const clean = String(input || '').trim();
   if (!clean) return null;
@@ -521,39 +520,45 @@ app.get('/game/:id', async (c) => {
   const refreshUrl = `/game/${encodeURIComponent(id)}?r=${Date.now()}#board`;
   if (error) body += `<p>${escapeHtml(error)}</p>`;
   if (game) {
-    let myRatingStr = '';
-    try {
-      const account = await lichess.getAccount(s.accessToken);
-      const perf = (account.perfs || {})[game.perf || game.speed];
-      if (perf && perf.rating) myRatingStr = ` (${perf.rating}${perf.prov ? '?' : ''})`;
-    } catch {}
     const opp = game.opponent || {};
-    const oppRatingStr = opp.rating ? ` (${opp.rating}${opp.provisional ? '?' : ''})` : opp.aiLevel ? ` (AI level ${opp.aiLevel})` : '';
-    const orientation = game.color === 'black' ? 'black' : 'white'; const canMove = !!game.isMyTurn;
+    const orientation = game.color === 'black' ? 'black' : 'white';
+    const canMove = !!game.isMyTurn;
+    // Stockfish / AI games are also played on this route - the player bars
+    // and clocks are for multiplayer (real opponents) only. AI games have no
+    // real clock, which is why the opponent timer showed nonsense values.
+    const isAiGame = !!opp.aiLevel;
 
-    // Clocks: getPlaying() only exposes YOUR OWN secondsLeft, never the
-    // opponent's. The game watcher sees both sides' clocks on every Board
-    // API stream event, so ask it first; if it hasn't received anything yet
-    // (e.g. it only just started), fall back to a one-shot stream read.
-    let watch = await watcherState(c, id);
-    if (!watch || typeof watch.wtime !== 'number') {
-      try { watch = await lichess.boardGameState(s.accessToken, id); } catch { watch = null; }
+    let myRatingStr = '', oppRatingStr = '';
+    let myClock = null, oppClock = null;
+    if (!isAiGame) {
+      oppRatingStr = opp.rating ? ` (${opp.rating}${opp.provisional ? '?' : ''})` : '';
+      try {
+        const account = await lichess.getAccount(s.accessToken);
+        const perf = (account.perfs || {})[game.perf || game.speed];
+        if (perf && perf.rating) myRatingStr = ` (${perf.rating}${perf.prov ? '?' : ''})`;
+      } catch {}
+      // getPlaying() only exposes YOUR OWN secondsLeft, never the opponent's.
+      // The game watcher sees both sides' clocks on every Board API stream
+      // event, so ask it first; if it hasn't received anything yet (e.g. it
+      // only just started), fall back to a one-shot stream read.
+      let watch = await watcherState(c, id);
+      if (!watch || typeof watch.wtime !== 'number') {
+        try { watch = await lichess.boardGameState(s.accessToken, id); } catch { watch = null; }
+      }
+      const oppClockMs = (watch && typeof watch.wtime === 'number' && typeof watch.btime === 'number')
+        ? (game.color === 'white' ? watch.btime : watch.wtime) : null;
+      myClock = typeof game.secondsLeft === 'number' ? fmtClockSec(game.secondsLeft) : null;
+      oppClock = oppClockMs !== null ? fmtClockMs(oppClockMs) : null;
     }
-    const oppClockMs = (watch && typeof watch.wtime === 'number' && typeof watch.btime === 'number')
-      ? (game.color === 'white' ? watch.btime : watch.wtime) : null;
-    const myClock = typeof game.secondsLeft === 'number' ? fmtClockSec(game.secondsLeft) : null;
-    const oppClock = oppClockMs !== null ? fmtClockMs(oppClockMs) : null;
 
-    // Opponent bar above the board, your bar below it (the board is always
-    // oriented your way, so this lines up on both colors).
-    body += playerBar(`${opp.username || '?'}${oppRatingStr}`, { clock: oppClock, toMove: !canMove });
+    if (!isAiGame) body += playerBar(`${opp.username || '?'}${oppRatingStr}`, { clock: oppClock, toMove: !canMove });
     body += renderBoard(game.fen, orientation, {
       size, interactive: canMove, selected: canMove ? selected : null, lastMove: game.lastMove || null,
       isOwnPiece: (sq, piece) => (game.color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
       selectHref: (sq) => `/game/${encodeURIComponent(id)}?selected=${sq}#sq-${sq}`,
       moveHref: (uci) => `/game/${encodeURIComponent(id)}?move=${uci}`,
     });
-    body += playerBar(`${s.username}${myRatingStr} - you (${game.color})`, { clock: myClock, toMove: canMove });
+    if (!isAiGame) body += playerBar(`${s.username}${myRatingStr} - you (${game.color})`, { clock: myClock, toMove: canMove });
 
     body += canMove ? '<p><b>Your move - tap a piece, or type e4/Nf3.</b></p>' : '<p>Waiting for opponent... (auto-refreshes)</p>';
     body += `<p><a href="${refreshUrl}">Refresh board</a></p>`;
