@@ -524,9 +524,12 @@ app.get('/game/:id', async (c) => {
     const orientation = game.color === 'black' ? 'black' : 'white';
     const canMove = !!game.isMyTurn;
     // Stockfish / AI games are also played on this route - the player bars
-    // and clocks are for multiplayer (real opponents) only. AI games have no
-    // real clock, which is why the opponent timer showed nonsense values.
-    const isAiGame = !!opp.aiLevel;
+    // and clocks are for multiplayer (real opponents) only. Lichess reports
+    // AI opponents in TWO different shapes depending on how the game was
+    // started: { aiLevel: N } OR { username: "Stockfish level N" } with no
+    // aiLevel field - so check BOTH, otherwise AI games leak through.
+    const oppNameStr = String(opp.username || opp.name || '');
+    const isAiGame = !!opp.aiLevel || /stockfish/i.test(oppNameStr) || opp.title === 'AI';
 
     let myRatingStr = '', oppRatingStr = '';
     let myClock = null, oppClock = null;
@@ -548,7 +551,9 @@ app.get('/game/:id', async (c) => {
       const oppClockMs = (watch && typeof watch.wtime === 'number' && typeof watch.btime === 'number')
         ? (game.color === 'white' ? watch.btime : watch.wtime) : null;
       myClock = typeof game.secondsLeft === 'number' ? fmtClockSec(game.secondsLeft) : null;
-      oppClock = oppClockMs !== null ? fmtClockMs(oppClockMs) : null;
+      // Clockless/unlimited games report absurdly large values (the stream
+      // sends a huge placeholder instead of a real clock) - never show those.
+      oppClock = oppClockMs !== null && oppClockMs < 86400000 ? fmtClockMs(oppClockMs) : null;
     }
 
     if (!isAiGame) body += playerBar(`${opp.username || '?'}${oppRatingStr}`, { clock: oppClock, toMove: !canMove });
