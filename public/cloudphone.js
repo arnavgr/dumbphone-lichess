@@ -238,7 +238,7 @@
     if (!freshBody) return false;
     document.body.innerHTML = freshBody.innerHTML;
     updateUrl(responseUrl);
-    removeMetaRefresh();
+    if (isGamePage()) removeMetaRefresh();
     compactNavigation();
     showStatus('Live');
     wrapAndFitBoard();
@@ -285,6 +285,12 @@
     });
   }
 
+  function boardMarkupWithoutFocus(board) {
+    const clone = board.cloneNode(true);
+    clone.querySelectorAll('.cp-focused').forEach((cell) => cell.classList.remove('cp-focused'));
+    return clone.outerHTML;
+  }
+
   async function pollGame() {
     if (pollBusy || document.hidden) return;
     const board = document.getElementById('board');
@@ -304,9 +310,9 @@
       const currentBoard = document.getElementById('board');
       if (!newBoard || !currentBoard) return;
 
-      // Keep focus and scroll stable while the clock ticks. Replace only the
-      // board when the server has actually produced a new position/selection.
-      if (newBoard.outerHTML !== currentBoard.outerHTML) {
+      // Ignore only our local focus outline when comparing positions, so a
+      // steady timer poll does not constantly steal D-pad focus.
+      if (boardMarkupWithoutFocus(newBoard) !== boardMarkupWithoutFocus(currentBoard)) {
         currentBoard.replaceWith(newBoard);
         wrapAndFitBoard();
         bindBoardLinks();
@@ -388,13 +394,13 @@
 
   function init() {
     injectStyles();
-    removeMetaRefresh();
     compactNavigation();
     bindKeyboard();
     bindGameState();
-    window.addEventListener('resize', scheduleFit);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once:true });
   else init();
+
+  window.addEventListener('resize', scheduleFit);
 })();
