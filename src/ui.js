@@ -26,7 +26,7 @@ export function page(title, body, session, opts = {}) {
     ? `<p><a href="/">Home</a> | <a href="/settings">Size</a> | ${escapeHtml(session.username)} | <a href="/logout">Logout</a></p>`
     : `<p><a href="/">Home</a> | <a href="/settings">Size</a> | <a href="/login">Login</a></p>`;
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${refresh}<script src="/cloudphone.js" defer></script><title>${escapeHtml(title)}</title></head>
+<html><head><meta charset="utf-8">${refresh}<title>${escapeHtml(title)}</title></head>
 <body>
 ${nav}
 <h3 style="margin:6px 0;">${escapeHtml(title)}</h3>
@@ -37,7 +37,7 @@ ${body}
 export function redirectPage(url, msg = 'Please wait...') {
   const u = escapeHtml(url);
   return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="refresh" content="0;url=${u}"><title>Please wait...</title><script src="/cloudphone.js" defer></script></head>
+<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${u}"><title>Please wait...</title></head>
 <body><p>${escapeHtml(msg)}</p><p><a href="${u}">&gt; Continue</a></p></body></html>`;
 }
 
