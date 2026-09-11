@@ -1,16 +1,15 @@
 import { Chess } from 'chess.js';
 
 // Board sizes. Widths include coordinate labels + 4px border:
-//   tiny ~116px (fits 128px-wide screens), small ~156px,
-//   normal ~220px (fits 240x320, default), large ~274px (fits 320px+).
+//   tiny ~128px (fits 128px-wide screens), small ~156px,
+//   normal ~220px (fits 240x320, default).
 export const BOARD_SIZES = {
-  tiny: { cell: 14, img: 12, coord: 0 },
+  tiny: { cell: 14, img: 12, coord: 6 },
   small: { cell: 17, img: 14, coord: 8 },
   normal: { cell: 24, img: 20, coord: 12 },
-  large: { cell: 30, img: 26, coord: 15 },
 };
 
-export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal', 'large'];
+export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal'];
 
 // Cloudphone-class browsers (JS-capable, e.g. Cloudmosa/Puffin) can ask for
 // an exact pixel cell size instead of picking one of the four presets above
@@ -24,7 +23,7 @@ export const CUSTOM_CELL_MAX = 48;
 export function customBoardSpec(cellPx) {
   const cell = Math.max(CUSTOM_CELL_MIN, Math.min(CUSTOM_CELL_MAX, Math.round(cellPx)));
   const img = Math.max(8, Math.round(cell * 0.84));
-  const coord = cell < 16 ? 0 : Math.round(cell * 0.5);
+  const coord = Math.max(4, Math.round(cell * 0.45));
   return { cell, img, coord };
 }
 

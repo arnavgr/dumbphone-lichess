@@ -85,7 +85,11 @@
     if (finalUrl.hash) {
       var id = finalUrl.hash.slice(1);
       var el = document.getElementById(id) || document.getElementsByName(id)[0];
-      if (el && el.scrollIntoView) setTimeout(function () { el.scrollIntoView(); }, 0);
+      // 'nearest' (not the scrollIntoView default of 'start') only moves the
+      // viewport the minimum amount needed - if the board/selected square is
+      // already visible, nothing scrolls at all, so tapping a piece to
+      // select it doesn't yank the view away from where you're looking.
+      if (el && el.scrollIntoView) setTimeout(function () { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }, 0);
     }
     scheduleAutoRefresh();
     autosizeBoard();
@@ -212,6 +216,14 @@
   function autosizeBoard() {
     var app = document.getElementById('app');
     if (!app || app.getAttribute('data-autosize') !== '1') return;
+    // A piece is currently selected (legal destinations highlighted) - don't
+    // re-check sizing right now. Selecting a piece scrolls the view slightly,
+    // which on mobile browsers can collapse/expand the address bar and
+    // change window.innerHeight; without this guard that could recompute a
+    // different "ideal" size and trigger a re-render that yanks the view
+    // away from the piece you just selected. Sizing gets re-checked again
+    // as soon as the selection is cancelled or a move is played.
+    if (/[?&]selected=/.test(location.search)) return;
     var pinned = readCookie('bsize');
     if (pinned && pinned !== 'custom') return; // user manually picked a fixed preset on /settings - respect it
     var board = document.getElementById('board');

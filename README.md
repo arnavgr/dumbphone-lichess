@@ -51,8 +51,8 @@ path is completely untouched (same server routes, same HTML, same
 run by a browser that can't handle it) progressively enhances the same
 server-rendered pages when JavaScript is available:
 
-- **Board auto-sizing.** The four fixed board sizes (`tiny`/`small`/
-  `normal`/`large`, still the only options shown to non-JS browsers on
+- **Board auto-sizing.** The three fixed board sizes (`tiny`/`small`/
+  `normal`, still the only options shown to non-JS browsers on
   `/settings`) stay exactly as they were. `app.js` additionally measures the
   real viewport (`window.innerWidth`/`innerHeight`) and asks the server, via
   a `bsize=custom` + `bcell=<px>` cookie pair, to render the board at an

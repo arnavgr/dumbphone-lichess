@@ -145,7 +145,7 @@ function describeChallenge(ch) {
 
 const SIZE_HINTS = {
   tiny: 'very small screens (128x160)', small: 'small screens (~160px wide)',
-  normal: '240x320 screens', large: '320px+ wide screens',
+  normal: '240x320 screens',
 };
 
 app.get('/settings', async (c) => {
