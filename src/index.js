@@ -3,13 +3,17 @@ import { Chess } from 'chess.js';
 import {
   randomString, codeChallengeS256, getSession, createSession, destroySession,
   saveOAuthState, consumeOAuthState, sessionCookie, clearedSessionCookie, parseCookies,
+  clockView, // CHANGED: live-adjusted clocks from the GameWatcher snapshot
 } from './lichess.js';
 import * as lichess from './lichess.js';
 import {
   renderBoard, sideToMove, puzzleBasePosition, puzzleStateFrom, normalizeUci, applyUciMoves,
   pickAiMove, applyAiMove, BOARD_SIZE_KEYS,
 } from './chess.js';
-import { page, redirectPage, errorPage, htmlResponse, escapeHtml, selectField, renderGamesList, playerBar } from './ui.js';
+import {
+  page, redirectPage, errorPage, htmlResponse, escapeHtml, selectField, renderGamesList,
+  playerBar, detectDevice, boardZone, fragmentResponse, fmtClockMs, // CHANGED imports
+} from './ui.js';
 import { TIME_CONTROLS, findTimeControl, AI_TIME_CONTROLS, findAiTimeControl, AI_LEVELS, LOCAL_AI_LEVELS } from './constants.js';
 
 // GameWatcher is a Durable Object (defined in lichess.js, since it's really
@@ -26,13 +30,41 @@ const UCI_MOVE_RE = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
 const SQUARE_RE = /^[a-h][1-8]$/;
 const LICHESS_SCOPES = ['board:play', 'challenge:read', 'challenge:write', 'puzzle:read'];
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const POLL_SECONDS = 3; // CHANGED: live board poll interval for cloud phones
 
 app.use('*', async (c, next) => {
   try { c.set('session', await getSession(c)); } catch { c.set('session', null); }
+  c.set('device', deviceFor(c)); // CHANGED: detect cloud phone / screen once per request
   await next();
 });
 
 const session = (c) => c.get('session') || null;
+const device = (c) => c.get('device') || { cloud: false, screen: null, autoSize: null };
+
+// CHANGED: page() wrapper that injects the detected device into every page.
+// For dumbphone UAs this changes nothing - page() output is identical.
+const P = (c, title, body, s, opts = {}) => page(title, body, s, { device: device(c), ...opts });
+
+// CHANGED: device detection with manual overrides.
+// - UA sniffing covers CloudMosha CloudPhone (headless Chromium).
+// - ?live=1 / ?live=0 forces either mode per-request (handy for testing).
+// - FORCE_CLOUD=1 var in wrangler.toml forces cloud mode if the UA ever
+//   doesn't match (dumbphones then still work via the <noscript> refresh).
+function deviceFor(c) {
+  const dev = detectDevice(c.req.header('User-Agent') || '', parseCookies(c)['scr'] || '');
+  const q = c.req.query('live');
+  if (q === '1') dev.cloud = true;
+  else if (q === '0') dev.cloud = false;
+  else if (String(c.env.FORCE_CLOUD) === '1') dev.cloud = true;
+  return dev;
+}
+
+// CHANGED: cloud phones get the board size auto-detected from their real
+// screen size, unless the user pinned a size on /settings (bfix cookie).
+function effectiveBoardSize(c, dev) {
+  if (dev.cloud && dev.autoSize && parseCookies(c)['bfix'] !== '1') return dev.autoSize;
+  return boardSize(c);
+}
 
 // ---- Game-presence watcher (Durable Object) helpers ----
 
@@ -79,12 +111,23 @@ function boardSize(c) {
 const newPuzzleHref = () => `/puzzle?r=${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
 const toSquare = (uci) => String(uci || '').slice(2, 4);
 
-// Clock formatting for the multiplayer player bars above/below the board.
-function fmtClockSec(totalSeconds) {
-  const t = Math.max(0, Math.floor(Number(totalSeconds) || 0));
-  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+// CHANGED: account data (used for the rating shown next to your name) is now
+// cached in KV for 10 minutes. Live polling hits /game/:id every few seconds,
+// and this keeps those polls from hammering the Lichess account endpoint.
+async function cachedAccount(c, s) {
+  const key = `acct:${s.username}`;
+  try {
+    const hit = await c.env.KV.get(key);
+    if (hit) return JSON.parse(hit);
+  } catch {}
+  try {
+    const account = await lichess.getAccount(s.accessToken);
+    try { await c.env.KV.put(key, JSON.stringify(account), { expirationTtl: 600 }); } catch {}
+    return account;
+  } catch {
+    return null;
+  }
 }
-const fmtClockMs = (ms) => fmtClockSec(ms / 1000);
 
 // Parses both UCI (e2e4) and SAN (e4, Nf3, O-O, e8=Q).
 function parseMoveInput(input, fen) {
@@ -141,13 +184,26 @@ const SIZE_HINTS = {
 
 app.get('/settings', async (c) => {
   const s = session(c);
+  const dev = device(c); // CHANGED
   const requested = c.req.query('s');
   let extraHeaders = {};
-  if (requested && BOARD_SIZE_KEYS.includes(requested)) {
-    extraHeaders = { 'Set-Cookie': `bsize=${requested}; Path=/; Max-Age=31536000` };
+  // CHANGED: 'auto' clears the manual override; picking a size sets bfix=1 so
+  // the choice wins over auto-detection even on cloud phones.
+  if (requested === 'auto') {
+    extraHeaders = { 'Set-Cookie': ['bsize=; Path=/; Max-Age=0', 'bfix=; Path=/; Max-Age=0'] };
+  } else if (requested && BOARD_SIZE_KEYS.includes(requested)) {
+    extraHeaders = { 'Set-Cookie': [`bsize=${requested}; Path=/; Max-Age=31536000`, 'bfix=1; Path=/; Max-Age=31536000'] };
   }
-  const current = requested && BOARD_SIZE_KEYS.includes(requested) ? requested : boardSize(c);
+  const manual = parseCookies(c)['bfix'] === '1';
+  const current = requested && BOARD_SIZE_KEYS.includes(requested) ? requested : effectiveBoardSize(c, dev);
   let body = '<p>Pick a board size for your screen. Saved on this phone.</p>';
+  // CHANGED: auto-detect option + cloud note.
+  if (dev.cloud && dev.screen) {
+    body += `<p>On this cloud phone the size is auto-detected from the screen (${dev.screen.w}x${dev.screen.h} &rarr; <b>${dev.autoSize}</b>) unless you pick one below.</p>`;
+  }
+  body += `<p><b>auto</b> - detect from screen `;
+  body += manual ? '<a href="/settings?s=auto">Use auto size</a>' : '<b style="color:#006600;">[current]</b>';
+  body += '</p>';
   for (const k of BOARD_SIZE_KEYS) {
     const active = k === current;
     body += `<p><b>${k}</b> - ${SIZE_HINTS[k]} `;
@@ -155,7 +211,7 @@ app.get('/settings', async (c) => {
     body += '</p>';
     body += renderBoard(START_FEN, 'white', { size: k });
   }
-  return htmlResponse(page('Board size', body, s), 200, extraHeaders);
+  return htmlResponse(P(c, 'Board size', body, s), 200, extraHeaders);
 });
 
 app.get('/', async (c) => {
@@ -166,7 +222,7 @@ app.get('/', async (c) => {
 <p><a href="/ai">&gt;&gt; Play vs a computer (no login needed)</a></p>
 <p><a href="/login">&gt;&gt; Login with Lichess to play other people</a></p>
 <p style="font-size:12px;">Puzzles and the local computer opponent work without login. Logging in adds rated multiplayer against real people and your ratings.</p>`;
-    return htmlResponse(page('Lichess Dumbphone', body, s));
+    return htmlResponse(P(c, 'Lichess Dumbphone', body, s));
   }
   let nowPlaying = [], incoming = [], loadError = null;
   try { nowPlaying = (await lichess.getPlaying(s.accessToken)).nowPlaying || []; } catch (e) { loadError = e.message; }
@@ -201,7 +257,7 @@ app.get('/', async (c) => {
   body += '<p><a href="/game/new/ai">&gt;&gt; Play vs AI (Lichess)</a></p>';
   body += '<p><a href="/ai">&gt;&gt; Play vs AI (no login)</a></p>';
   body += `<p><a href="${newPuzzleHref()}">&gt;&gt; Solve a puzzle</a></p>`;
-  return htmlResponse(page('Lichess Dumbphone', body, s, { refreshSeconds: incoming.length ? 30 : undefined }));
+  return htmlResponse(P(c, 'Lichess Dumbphone', body, s, { refreshSeconds: incoming.length ? 30 : undefined }));
 });
 
 // ---------------------------------------------------------------- Auth
@@ -221,7 +277,7 @@ app.get('/login', async (c) => {
   body += '<hr><h4 style="margin:8px 0 4px;">Option B - Paste a personal API token</h4>';
   body += `<p><a href="${escapeHtml(tokenCreateUrl())}">&gt;&gt; Create a token on lichess.org</a></p>`;
   body += `<form method="post" action="/login/token"><p>Paste your token: <input type="text" name="token" size="30"></p><p><input type="submit" value="Log in with token"></p></form>`;
-  return htmlResponse(page('Login', body, s));
+  return htmlResponse(P(c, 'Login', body, s));
 });
 
 app.get('/login/oauth', async (c) => {
@@ -288,7 +344,7 @@ async function ownerLoginAttempts(c) {
 app.get('/owner-login', async (c) => {
   const s = session(c);
   const body = `<p>Owner-only quick login.</p><form method="post" action="/owner-login"><p>Password: <input type="password" name="password" size="20"></p><p><input type="submit" value="Log in"></p></form>`;
-  return htmlResponse(page('Owner login', body, s));
+  return htmlResponse(P(c, 'Owner login', body, s));
 });
 
 app.post('/owner-login', async (c) => {
@@ -318,7 +374,7 @@ app.get('/game/new/ai', async (c) => {
 <p>Your color: ${selectField('color', [{ value: 'random', label: 'Random' }, { value: 'white', label: 'White' }, { value: 'black', label: 'Black' }], 'random')}</p>
 <p>Time control: ${selectField('timeControl', AI_TIME_CONTROLS, 'unlimited')}</p>
 <p><input type="submit" value="Start game"></p></form>`;
-  return htmlResponse(page('Play vs AI (Lichess)', body, s));
+  return htmlResponse(P(c, 'Play vs AI (Lichess)', body, s));
 });
 
 app.post('/game/new/ai', async (c) => {
@@ -345,7 +401,7 @@ app.get('/game/new/multiplayer', async (c) => {
   const body = `<h4>1) Quick pair</h4><form method="post" action="/game/new/multiplayer/quick"><p>Time: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p><p>${ratedDefault}</p><p><input type="submit" value="Find opponent"></p></form><hr>
 <h4>2) Challenge username</h4><form method="post" action="/game/new/multiplayer/user"><p>User: <input type="text" name="username" size="16"></p><p>Color: ${colorField}</p><p>Time: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p><p>${ratedCasual}</p><p><input type="submit" value="Send"></p></form><hr>
 <h4>3) Open link</h4><form method="post" action="/game/new/multiplayer/open"><p>Time: ${selectField('timeControl', TIME_CONTROLS, 'rapid-600-0')}</p><p>${ratedCasual}</p><p><input type="submit" value="Create link"></p></form>`;
-  return htmlResponse(page('Play multiplayer', body, s));
+  return htmlResponse(P(c, 'Play multiplayer', body, s));
 });
 
 app.post('/game/new/multiplayer/quick', async (c) => {
@@ -372,9 +428,9 @@ app.get('/searching', async (c) => {
     // Straight redirect so the browser lands directly on the board.
     return c.redirect(`/game/${newGame.gameId}#board`, 302);
   }
-  if (elapsed > 90) return htmlResponse(page('Quick pair', '<p>No opponent found within 90s.</p><p><a href="/game/new/multiplayer">Back</a></p>', s));
+  if (elapsed > 90) return htmlResponse(P(c, 'Quick pair', '<p>No opponent found within 90s.</p><p><a href="/game/new/multiplayer">Back</a></p>', s));
   const body = `<p><b>Looking for ${rated ? 'RATED' : 'casual'} ${escapeHtml(tc.label)}... (${elapsed}s)</b></p><p><a href="${escapeHtml(selfUrl)}">Check now</a></p>${err ? `<p>${escapeHtml(err)}</p>` : ''}`;
-  return htmlResponse(page('Searching', body, s, { refreshSeconds: 5 }));
+  return htmlResponse(P(c, 'Searching', body, s, { refreshSeconds: 5 }));
 });
 
 app.post('/game/new/multiplayer/user', async (c) => {
@@ -394,7 +450,7 @@ app.post('/game/new/multiplayer/open', async (c) => {
   try {
     const res = await lichess.challengeOpen(s.accessToken, { rated: form.rated, variant: 'standard', ...timeControlParams(tc) });
     const id = (res.challenge && res.challenge.id) || res.id; const url = (res.challenge && res.challenge.url) || res.url;
-    return htmlResponse(page('Open challenge', `<p>Share link:</p><p><b>${escapeHtml(url || '(none)')}</b></p><p><a href="/challenge/${escapeHtml(id)}">Status</a></p>`, s));
+    return htmlResponse(P(c, 'Open challenge', `<p>Share link:</p><p><b>${escapeHtml(url || '(none)')}</b></p><p><a href="/challenge/${escapeHtml(id)}">Status</a></p>`, s));
   } catch (e) { return htmlResponse(errorPage('Failed', e.message, '/game/new/multiplayer')); }
 });
 
@@ -408,7 +464,7 @@ app.get('/challenge/:id', async (c) => {
   if (ch.url) body += `<p>Link: <b>${escapeHtml(ch.url)}</b></p>`;
   body += `<p><a href="/challenge/${escapeHtml(id)}">Refresh</a></p><p><a href="/game/${escapeHtml(id)}#board">Open game</a></p>`;
   if (!ch.status || ch.status === 'created' || ch.status === 'sent') body += `<form method="post" action="/challenge/${escapeHtml(id)}/cancel"><p><input type="submit" value="Cancel"></p></form>`;
-  return htmlResponse(page('Challenge', body, s, { refreshSeconds: error ? undefined : 10 }));
+  return htmlResponse(P(c, 'Challenge', body, s, { refreshSeconds: error ? undefined : 10 }));
 });
 
 app.post('/challenge/:id/accept', async (c) => {
@@ -430,11 +486,11 @@ app.post('/challenge/:id/cancel', async (c) => { const s = session(c); if (!s) r
 app.get('/ai', async (c) => {
   const s = session(c);
   const body = `<p>Play vs a computer - no Lichess account needed.</p><form method="get" action="/ai/play"><p>Difficulty: ${selectField('diff', LOCAL_AI_LEVELS, 1)}</p><p>Color: ${selectField('color', [{ value: 'w', label: 'White' }, { value: 'b', label: 'Black' }], 'w')}</p><p><input type="submit" value="Start game"></p></form>`;
-  return htmlResponse(page('Play vs AI (no login)', body, s));
+  return htmlResponse(P(c, 'Play vs AI (no login)', body, s));
 });
 
 app.get('/ai/play', async (c) => {
-  const s = session(c); const size = boardSize(c); const q = c.req.query();
+  const s = session(c); const dev = device(c); const size = effectiveBoardSize(c, dev); const q = c.req.query(); // CHANGED: auto size on cloud
   let diff = parseInt(q.diff, 10); if (!Number.isFinite(diff) || diff < 0) diff = 1; if (diff > 4) diff = 4;
   const color = q.color === 'b' ? 'b' : 'w'; const fenParam = q.fen || null;
   const moveRaw = (q.move || '').trim(); const selectedParam = (q.selected || '').toLowerCase();
@@ -488,14 +544,18 @@ app.get('/ai/play', async (c) => {
   body += `<p><a href="${escapeHtml(refreshUrl)}">Refresh board</a> | <a href="/ai">New game</a></p>`;
   body += '<div style="margin-top:10px;font-size:12px;"><b>Difficulty:</b> ' + LOCAL_AI_LEVELS.map((l) => String(l.value) === String(diff) ? `<b>[${l.value}]</b>` : `<a href="${escapeHtml(linkBase({ fen: chess.fen(), diff: String(l.value), lm: lastMove }))}">${l.value}</a>`).join(' ') + '</div>';
   body += `<div style="margin-top:10px;font-size:12px;"><b>New game:</b> <a href="/ai/play?diff=${diff}&amp;color=w">White</a> | <a href="/ai/play?diff=${diff}&amp;color=b">Black</a></div>`;
-  return htmlResponse(page('Play vs AI (no login)', body, s));
+  return htmlResponse(P(c, 'Play vs AI (no login)', body, s));
 });
 
 // ---------------------------------------------------------------- Game board
 
 app.get('/game/:id', async (c) => {
   const s = session(c); if (!s) return htmlResponse(redirectPage('/login', 'Please log in first.'));
-  const id = c.req.param('id'); const size = boardSize(c); const moveRaw = (c.req.query('move') || '').trim();
+  const dev = device(c); // CHANGED
+  const id = c.req.param('id');
+  const isFrag = c.req.query('frag') === '1'; // CHANGED: live poll target for cloud phones
+  const size = effectiveBoardSize(c, dev); // CHANGED: auto size on cloud
+  const moveRaw = (c.req.query('move') || '').trim();
   const selectedParam = (c.req.query('selected') || '').toLowerCase();
   const selected = SQUARE_RE.test(selectedParam) ? selectedParam : null;
   let game = null, error = null;
@@ -516,9 +576,20 @@ app.get('/game/:id', async (c) => {
       return htmlResponse(errorPage('Move rejected', e.message, `/game/${id}#board`), 200);
     }
   }
-  let body = ''; let refreshSeconds;
+
+  // CHANGED: the page is built as a "board zone" (bars + board + move form)
+  // plus static stuff around it (error, resign). Cloud phones with a live
+  // game poll ?frag=1 and get ONLY the zone back; dumb phones get the exact
+  // same HTML as before.
+  let refreshSeconds;
   const refreshUrl = `/game/${encodeURIComponent(id)}?r=${Date.now()}#board`;
-  if (error) body += `<p>${escapeHtml(error)}</p>`;
+  // The poll URL preserves a pending square selection so a swap can't drop it.
+  const fragUrl = `/game/${encodeURIComponent(id)}?frag=1${selected ? `&selected=${encodeURIComponent(selected)}` : ''}`;
+  let zoneInner = '';
+  let clockState = { wtime: 0, btime: 0, turn: null, status: '', poll: POLL_SECONDS, frag: fragUrl, stop: 0 };
+  let liveMode = false;
+  let resignForm = '';
+
   if (game) {
     const opp = game.opponent || {};
     const orientation = game.color === 'black' ? 'black' : 'white';
@@ -530,17 +601,18 @@ app.get('/game/:id', async (c) => {
     // aiLevel field - so check BOTH, otherwise AI games leak through.
     const oppNameStr = String(opp.username || opp.name || '');
     const isAiGame = !!opp.aiLevel || /stockfish/i.test(oppNameStr) || opp.title === 'AI';
+    // CHANGED: live polling only makes sense against real opponents (AI moves
+    // instantly and reloads the page after your move anyway).
+    liveMode = !!(dev.cloud && !isAiGame);
 
     let myRatingStr = '', oppRatingStr = '';
     let myClock = null, oppClock = null;
     if (!isAiGame) {
       oppRatingStr = opp.rating ? ` (${opp.rating}${opp.provisional ? '?' : ''})` : '';
-      try {
-        const account = await lichess.getAccount(s.accessToken);
-        const perf = (account.perfs || {})[game.perf || game.speed];
-        if (perf && perf.rating) myRatingStr = ` (${perf.rating}${perf.prov ? '?' : ''})`;
-      } catch {}
-      // getPlaying() only exposes YOUR OWN secondsLeft, never the opponent's.
+      // CHANGED: rating comes from a 10-min KV cache so polls stay light.
+      const account = await cachedAccount(c, s);
+      const perf = account ? (account.perfs || {})[game.perf || game.speed] : null;
+      if (perf && perf.rating) myRatingStr = ` (${perf.rating}${perf.prov ? '?' : ''})`;
       // The game watcher sees both sides' clocks on every Board API stream
       // event, so ask it first; if it hasn't received anything yet (e.g. it
       // only just started), fall back to a one-shot stream read.
@@ -548,48 +620,78 @@ app.get('/game/:id', async (c) => {
       if (!watch || typeof watch.wtime !== 'number') {
         try { watch = await lichess.boardGameState(s.accessToken, id); } catch { watch = null; }
       }
-      const oppClockMs = (watch && typeof watch.wtime === 'number' && typeof watch.btime === 'number')
-        ? (game.color === 'white' ? watch.btime : watch.wtime) : null;
-      myClock = typeof game.secondsLeft === 'number' ? fmtClockSec(game.secondsLeft) : null;
+      // CHANGED: both clocks now come from the watcher, live-adjusted to
+      // "now" (clockView subtracts time elapsed since the last stream event
+      // from the clock of the side to move). The client script then ticks
+      // them locally between polls. getPlaying's secondsLeft is only used
+      // as a fallback when the watcher has no clock data at all.
+      const cv = clockView(watch);
       // Clockless/unlimited games report absurdly large values (the stream
       // sends a huge placeholder instead of a real clock) - never show those.
-      oppClock = oppClockMs !== null && oppClockMs < 86400000 ? fmtClockMs(oppClockMs) : null;
+      const clocked = cv && cv.wtime < 86400000 && cv.btime < 86400000;
+      if (clocked) {
+        oppClock = fmtClockMs(game.color === 'white' ? cv.btime : cv.wtime);
+        myClock = fmtClockMs(game.color === 'white' ? cv.wtime : cv.btime);
+        clockState = { wtime: cv.wtime, btime: cv.btime, turn: cv.turn, status: cv.status, poll: POLL_SECONDS, frag: fragUrl, stop: 0 };
+      } else {
+        myClock = typeof game.secondsLeft === 'number' ? fmtClockMs(game.secondsLeft * 1000) : null;
+        clockState = { ...clockState, status: cv ? cv.status : '', turn: cv ? cv.turn : null };
+      }
     }
 
-    if (!isAiGame) body += playerBar(`${opp.username || '?'}${oppRatingStr}`, { clock: oppClock, toMove: !canMove });
-    body += renderBoard(game.fen, orientation, {
+    // CHANGED: player bars get side ids in live mode so clocks tick in place.
+    const oppSideOpt = liveMode ? { side: game.color === 'white' ? 'b' : 'w' } : {};
+    const mySideOpt = liveMode ? { side: game.color === 'white' ? 'w' : 'b' } : {};
+
+    if (!isAiGame) zoneInner += playerBar(`${opp.username || '?'}${oppRatingStr}`, { clock: oppClock, toMove: !canMove, ...oppSideOpt });
+    zoneInner += renderBoard(game.fen, orientation, {
       size, interactive: canMove, selected: canMove ? selected : null, lastMove: game.lastMove || null,
       isOwnPiece: (sq, piece) => (game.color === 'white' ? piece === piece.toUpperCase() : piece === piece.toLowerCase()),
       selectHref: (sq) => `/game/${encodeURIComponent(id)}?selected=${sq}#sq-${sq}`,
       moveHref: (uci) => `/game/${encodeURIComponent(id)}?move=${uci}`,
     });
-    if (!isAiGame) body += playerBar(`${s.username}${myRatingStr} - you (${game.color})`, { clock: myClock, toMove: canMove });
+    if (!isAiGame) zoneInner += playerBar(`${s.username}${myRatingStr} - you (${game.color})`, { clock: myClock, toMove: canMove, ...mySideOpt });
 
-    body += canMove ? '<p><b>Your move - tap a piece, or type e4/Nf3.</b></p>' : '<p>Waiting for opponent... (auto-refreshes)</p>';
-    body += `<p><a href="${refreshUrl}">Refresh board</a></p>`;
+    zoneInner += canMove ? '<p><b>Your move - tap a piece, or type e4/Nf3.</b></p>' : '<p>Waiting for opponent... (auto-refreshes)</p>';
+    zoneInner += `<p><a href="${refreshUrl}">Refresh board</a></p>`;
     if (canMove) {
-      if (selected) body += `<p><a href="${refreshUrl}">[Cancel selection]</a></p>`;
-      body += `<form method="post" action="/game/${encodeURIComponent(id)}/move"><p style="font-size:12px;">Type move (e4, Nf3, O-O, or e2e4): <input type="text" name="move" size="8" maxlength="6"> <input type="submit" value="Play"></p></form>`;
+      if (selected) zoneInner += `<p><a href="${refreshUrl}">[Cancel selection]</a></p>`;
+      zoneInner += `<form method="post" action="/game/${encodeURIComponent(id)}/move"><p style="font-size:12px;">Type move (e4, Nf3, O-O, or e2e4): <input type="text" name="move" size="8" maxlength="6"> <input type="submit" value="Play"></p></form>`;
     }
-    body += `<form method="post" action="/game/${encodeURIComponent(id)}/resign"><p><input type="submit" value="Resign"></p></form>`;
+    // Resign stays OUTSIDE the board zone (it must never be swapped away
+    // mid-tap by a poll).
+    resignForm = `<form method="post" action="/game/${encodeURIComponent(id)}/resign"><p><input type="submit" value="Resign"></p></form>`;
     if (!canMove && !selected) refreshSeconds = 15;
   } else {
     let finished = null; try { finished = await lichess.gameExport(id); } catch {}
     if (finished) {
-      body += '<p>This game is not currently active.</p>';
-      if (finished.status) body += `<p>Status: ${escapeHtml(finished.status)}</p>`;
-      if (finished.winner) body += `<p>Winner: ${escapeHtml(finished.winner)}</p>`;
+      zoneInner += '<p>This game is not currently active.</p>';
+      if (finished.status) zoneInner += `<p>Status: ${escapeHtml(finished.status)}</p>`;
+      if (finished.winner) zoneInner += `<p>Winner: ${escapeHtml(finished.winner)}</p>`;
       if (finished.pgn) {
-        try { const chess = new Chess(); chess.loadPgn(finished.pgn); const hist = chess.history({ verbose: true }); const last = hist[hist.length - 1]; const lastMove = last ? `${last.from}${last.to}${last.promotion || ''}` : null; body += renderBoard(chess.fen(), 'white', { size, lastMove }); } catch {}
+        try { const chess = new Chess(); chess.loadPgn(finished.pgn); const hist = chess.history({ verbose: true }); const last = hist[hist.length - 1]; const lastMove = last ? `${last.from}${last.to}${last.promotion || ''}` : null; zoneInner += renderBoard(chess.fen(), 'white', { size, lastMove }); } catch {}
       }
-      body += `<p><a href="https://lichess.org/${encodeURIComponent(id)}">&gt; View on lichess.org</a></p>`;
+      zoneInner += `<p><a href="https://lichess.org/${encodeURIComponent(id)}">&gt; View on lichess.org</a></p>`;
+      // CHANGED: tell the live poller to stop - the game is over.
+      clockState = { ...clockState, status: finished.status || 'unknown', stop: 1 };
     } else {
-      body += '<p>Game not found or aborted.</p>';
-      body += `<p>If this is a challenge, <a href="/challenge/${encodeURIComponent(id)}">check status</a>.</p>`;
+      zoneInner += '<p>Game not found or aborted.</p>';
+      zoneInner += `<p>If this is a challenge, <a href="/challenge/${encodeURIComponent(id)}">check status</a>.</p>`;
+      clockState = { ...clockState, status: 'aborted', stop: 1 };
     }
-    body += `<p><a href="${refreshUrl}">Refresh</a> | <a href="/">Home</a></p>`;
+    zoneInner += `<p><a href="${refreshUrl}">Refresh</a> | <a href="/">Home</a></p>`;
   }
-  return htmlResponse(page('Game', body, s, { refreshSeconds, refreshUrl }));
+
+  // CHANGED: fragment responses (live polls) return just the zone.
+  if (isFrag) return fragmentResponse(zoneInner, clockState);
+
+  // Full page. Dumb phones get the zone content unwrapped (byte-identical to
+  // the old markup); cloud phones get the wrapped zone + clock JSON.
+  const wrapped = isFrag || liveMode;
+  let body = error ? `<p>${escapeHtml(error)}</p>` : '';
+  body += wrapped ? boardZone(zoneInner, clockState) : zoneInner;
+  body += resignForm;
+  return htmlResponse(P(c, 'Game', body, s, { live: liveMode, refreshSeconds, refreshUrl }));
 });
 
 app.post('/game/:id/move', async (c) => {
@@ -642,7 +744,8 @@ app.get('/puzzle', async (c) => {
 
 app.get('/puzzle/:id', async (c) => {
   const s = session(c); const id = c.req.param('id'); const pid = encodeURIComponent(id);
-  const size = boardSize(c); const step = parseStep(c.req.query('step')); const msg = c.req.query('msg');
+  const dev = device(c); const size = effectiveBoardSize(c, dev); // CHANGED: auto size on cloud
+  const step = parseStep(c.req.query('step')); const msg = c.req.query('msg');
   let puzzle; try { puzzle = await lichess.puzzleById(s ? s.accessToken : null, id); } catch (e) { return htmlResponse(errorPage('Could not load puzzle', e.message, newPuzzleHref())); }
   let base, solution;
   try { base = puzzleBasePosition(puzzle); solution = ((puzzle.puzzle && puzzle.puzzle.solution) || []).map(normalizeUci); } catch (e) { return htmlResponse(errorPage('Puzzle setup error', e.message, newPuzzleHref()), 500); }
@@ -692,7 +795,7 @@ app.get('/puzzle/:id', async (c) => {
     body += `<p><a href="/puzzle/${pid}?step=${state.step}&amp;reveal=1#board">Show solution (auto-plays the correct move)</a></p>`;
   }
   body += `<p><a href="${refreshUrl}">Refresh</a> | <a href="${newPuzzleHref()}">New puzzle</a></p>`;
-  return htmlResponse(page('Puzzle', body, s));
+  return htmlResponse(P(c, 'Puzzle', body, s));
 });
 
 app.post('/puzzle/:id', async (c) => {

@@ -161,15 +161,40 @@ export const boardMove = (token, gameId, move) =>
 export const boardResign = (token, gameId) =>
   lpostEmpty(token, `/api/board/game/${gameId}/resign`);
 
+// CHANGED: live clock helpers ---------------------------------------------
+
+// Side to move derived from the move list ("e2e4 e7e5 ..."). All games here
+// are standard chess from the initial position, so ply parity is exact.
+export function turnFromMoves(moves) {
+  const n = String(moves || '').trim() ? String(moves).trim().split(/\s+/).length : 0;
+  return n % 2 === 0 ? 'w' : 'b';
+}
+
+// Live-adjusted clock view from a GameWatcher snapshot. wtime/btime in the
+// stream are the values as of the last clock-carrying stream event; subtract
+// the time elapsed since then from the clock of the side that is currently
+// moving, so both numbers are correct "now". Returns null when the snapshot
+// has no usable clock data.
+export function clockView(latest, now = Date.now()) {
+  if (!latest || typeof latest.wtime !== 'number' || typeof latest.btime !== 'number') return null;
+  const status = String(latest.status || '');
+  const turn = turnFromMoves(latest.moves);
+  let w = latest.wtime;
+  let b = latest.btime;
+  if (status === 'started') {
+    const age = Math.max(0, now - (Number(latest._updatedAt) || now));
+    if (turn === 'w') w = Math.max(0, w - age);
+    else b = Math.max(0, b - age);
+  }
+  return { wtime: Math.round(w), btime: Math.round(b), turn, status };
+}
+
+// --------------------------------------------------------------------------
+
 // Read ONLY the first event of a board game's state stream, then disconnect.
-// That first event carries the current position, status and BOTH players'
-// clocks (wtime/btime in milliseconds). /api/account/playing only exposes
-// your own secondsLeft, so this is how we get the opponent's timer. Best
-// effort: returns null if the game isn't a board game / stream can't be read.
-//
-// NOTE: this is now mostly a fallback. GameWatcher (below) keeps a stream
-// open continuously and has fresher data - this one-shot read only gets used
-// on /game/:id when the watcher hasn't received anything yet.
+// Best effort: returns null if the game isn't a board game / stream can't be
+// read. Mostly a fallback - GameWatcher below keeps a stream open
+// continuously and has fresher data.
 export async function boardGameState(token, gameId, timeoutMs = 5000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -209,7 +234,7 @@ export async function quickPairSeek(token, params, timeoutMs = 20000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${BASE}/api/board/seek`, {
+    const res = await fetch(BASE + '/api/board/seek', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...authHeaders(token) },
       body,
@@ -269,27 +294,17 @@ export const puzzleBatch = (token, angle, nb) =>
 // ---------------------------------------------------------------------
 // GameWatcher (Durable Object)
 //
-// WHY THIS EXISTS: Lichess treats "connected to the Board API's game
-// stream" (GET /api/board/game/stream/{id}) as your presence at the
-// board - it's how every real Board API client (bots, DGT boards, etc.)
-// proves it's still there. This app renders a page and closes the
-// connection, so without this object, Lichess sees us connect for an
-// instant on every page load and then vanish - and starts its "opponent
-// left" abort countdown the moment each page finishes rendering.
-//
-// This object holds that stream connection open for the lifetime of a
-// game, independent of whether/when the phone happens to load a page,
-// and caches the latest position/clocks/status so page renders can read
-// them without hitting Lichess fresh each time. A watchdog alarm re-checks
-// every few seconds and reconnects if the stream has gone quiet, so a
-// dropped connection gets re-established well within the window Lichess
-// allows before flagging us as gone.
+// Holds the Board API game stream open for the lifetime of a game so Lichess
+// sees us as continuously present at the board (even between page loads),
+// and caches the latest position/clocks/status so page renders can read them
+// without hitting Lichess fresh each time. A watchdog alarm reconnects if
+// the stream goes quiet.
 const TERMINAL_STATUSES = new Set([
   'mate', 'resign', 'stalemate', 'timeout', 'draw',
   'outoftime', 'cheat', 'noStart', 'aborted', 'variantEnd',
 ]);
-const STALE_MS = 8000; // if we've heard nothing in 8s, assume the connection died
-const WATCHDOG_MS = 5000; // check that often - comfortably under Lichess's ~10-20s window
+const STALE_MS = 8000;
+const WATCHDOG_MS = 5000;
 
 export class GameWatcher {
   constructor(state, env) {
@@ -299,6 +314,7 @@ export class GameWatcher {
     this.generation = 0;
     this.lastHeardAt = 0;
     this.latest = null;
+    this.updatedAt = 0; // CHANGED: when `latest` clock data was received
   }
 
   async fetch(request) {
@@ -323,7 +339,12 @@ export class GameWatcher {
     }
 
     if (url.pathname === '/state') {
-      return new Response(JSON.stringify(this.latest || {}), {
+      // CHANGED: expose _updatedAt (so consumers can live-adjust clocks)
+      // and _watching (whether the stream loop is still running).
+      const body = this.latest
+        ? { ...this.latest, _updatedAt: this.updatedAt, _watching: this.running }
+        : {};
+      return new Response(JSON.stringify(body), {
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -331,7 +352,6 @@ export class GameWatcher {
     return new Response('not found', { status: 404 });
   }
 
-  // Called by the Cloudflare runtime when the alarm set above fires.
   async alarm() {
     if (!this.running) return;
     if (Date.now() - this.lastHeardAt > STALE_MS) this.connect();
@@ -340,7 +360,7 @@ export class GameWatcher {
 
   async connect() {
     if (!this.token || !this.gameId) return;
-    const gen = ++this.generation; // if an older loop is still winding down, this retires it
+    const gen = ++this.generation;
     this.lastHeardAt = Date.now();
     try {
       const res = await fetch(`${BASE}/api/board/game/stream/${this.gameId}`, {
@@ -352,7 +372,7 @@ export class GameWatcher {
       let buf = '';
       while (this.running && gen === this.generation) {
         const { done, value } = await reader.read();
-        this.lastHeardAt = Date.now(); // any byte counts, including keep-alive blank lines
+        this.lastHeardAt = Date.now();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         let nl;
@@ -379,6 +399,7 @@ export class GameWatcher {
       return;
     }
     if (evt.type === 'gameFull') {
+      this.updatedAt = Date.now(); // CHANGED
       this.latest = {
         ...(this.latest || {}),
         ...evt.state,
@@ -387,8 +408,11 @@ export class GameWatcher {
         initialFen: evt.initialFen,
       };
     } else if (evt.type === 'gameState') {
+      this.updatedAt = Date.now(); // CHANGED
       this.latest = { ...(this.latest || {}), ...evt };
     } else if (evt.type === 'opponentGone') {
+      // No clock change in this event - leave updatedAt anchored at the last
+      // clock-carrying event so clock math stays correct.
       this.latest = {
         ...(this.latest || {}),
         opponentGone: evt.gone,
