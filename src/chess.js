@@ -12,7 +12,24 @@ export const BOARD_SIZES = {
 
 export const BOARD_SIZE_KEYS = ['tiny', 'small', 'normal', 'large'];
 
+// Cloudphone-class browsers (JS-capable, e.g. Cloudmosa/Puffin) can ask for
+// an exact pixel cell size instead of picking one of the four presets above
+// - see public/app.js, which measures the real viewport and requests this
+// via a bsize=custom + bcell=<px> cookie pair (read in src/index.js's
+// boardSize()). Clamped here so a bad/huge value from a buggy client can't
+// blow up the table.
+export const CUSTOM_CELL_MIN = 10;
+export const CUSTOM_CELL_MAX = 48;
+
+export function customBoardSpec(cellPx) {
+  const cell = Math.max(CUSTOM_CELL_MIN, Math.min(CUSTOM_CELL_MAX, Math.round(cellPx)));
+  const img = Math.max(8, Math.round(cell * 0.84));
+  const coord = cell < 16 ? 0 : Math.round(cell * 0.5);
+  return { cell, img, coord };
+}
+
 export function boardSizeSpec(name) {
+  if (typeof name === 'number' && Number.isFinite(name)) return customBoardSpec(name);
   return BOARD_SIZES[name] || BOARD_SIZES.normal;
 }
 
@@ -101,7 +118,7 @@ export function renderBoard(fen, orientation = 'white', opts = {}) {
     row += `<td style="${coordStyle}width:${COORD}px;height:${COORD}px;"></td></tr>`;
     return row;
   };
-  let html = `<a name="board"></a><table id="board" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:4px auto;border:2px solid #333;">`;
+  let html = `<a name="board"></a><table id="board" data-cell="${CELL}" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:4px auto;border:2px solid #333;">`;
   html += fileRow();
   for (const rank of ranksTopDown) {
     html += showCoords ? `<tr><td style="${coordStyle}width:${COORD}px;">${rank}</td>` : '<tr>';

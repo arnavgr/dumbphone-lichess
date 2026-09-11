@@ -1,0 +1,105 @@
+/* Progressive-enhancement styling only. Every rule here is scoped under
+   .js, a class app.js adds to <html> the moment it runs. A dumbphone
+   browser that can't run JavaScript never gets that class, so none of
+   this ever applies there - it keeps rendering the plain inline-styled
+   markup src/ui.js and src/chess.js already produce, unchanged.
+
+   Nothing here touches the chess board's own square/piece colors or
+   sizing - those stay exactly as generated server-side (inline styles,
+   which win over anything here anyway); this file is only about the
+   surrounding chrome (nav, headings, forms, buttons, spacing). */
+
+.js, .js body {
+  margin: 0;
+  padding: 0;
+}
+
+.js body {
+  font-family: -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.35;
+  color: #111;
+  background: #fafafa;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+.js #app {
+  box-sizing: border-box;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 0 8px 24px;
+}
+
+/* The nav bar is always the first <p> rendered inside #app - see page()
+   in src/ui.js. */
+.js #app > p:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  background: #222;
+  color: #fff;
+  margin: 0 -8px 8px;
+  padding: 8px 10px;
+  border-radius: 0 0 8px 8px;
+  font-size: 13px;
+}
+
+.js #app > p:first-child a {
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.js h3 {
+  font-size: 17px;
+  margin: 4px 0 10px;
+}
+
+.js h4 {
+  font-size: 15px;
+  margin: 10px 0 4px;
+}
+
+.js a {
+  color: #0a5dc2;
+}
+
+.js form input[type="submit"],
+.js form button {
+  font-size: 15px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #999;
+  background: #f0f0f0;
+  margin: 2px 2px 2px 0;
+}
+
+.js form input[type="text"],
+.js form input[type="password"],
+.js form select {
+  font-size: 15px;
+  padding: 6px;
+  border-radius: 6px;
+  border: 1px solid #aaa;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.js table#board {
+  margin: 10px auto !important;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
+.js p {
+  margin: 6px 0;
+}
+
+.js hr {
+  border: none;
+  border-top: 1px solid #ddd;
+  margin: 10px 0;
+}

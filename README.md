@@ -1,8 +1,14 @@
 # Lichess Dumbphone
 
 A real Lichess client built to run on feature-phone browsers (Opera Mini on
-Nokia/OEM devices, CloudPhone, etc). No JavaScript anywhere - every page is
-plain HTML rendered on the server by a Cloudflare Worker.
+Nokia/OEM devices, etc). Every page works as plain server-rendered HTML with
+no JavaScript at all, so it's fully usable on dumbphones. On JavaScript-
+capable small-screen browsers - like Cloudmosa/Puffin-style "cloudphone"
+browsers (QVGA-class 128x160/240x320 screens running a real, if remote,
+Chromium engine) - a small optional script progressively enhances the same
+pages: the board auto-sizes to the exact screen, and moves/opponent updates
+apply in place via AJAX instead of full page reloads. See "Cloudphone
+(Cloudmosa/Puffin-style) support" below.
 
 ## Features
 
@@ -36,6 +42,49 @@ plain HTML rendered on the server by a Cloudflare Worker.
   redirects automatically, every redirect in this app is a real HTML page
   with a manual "Continue" link, not just a 302.
 
+## Cloudphone (Cloudmosa/Puffin-style) support
+
+Everything above still works with zero JavaScript, exactly as before - that
+path is completely untouched (same server routes, same HTML, same
+`<a href>`/`<form>`/meta-refresh behavior). On top of it, `public/app.js`
+(loaded via a plain `<script defer>` tag, so it's simply never requested or
+run by a browser that can't handle it) progressively enhances the same
+server-rendered pages when JavaScript is available:
+
+- **Board auto-sizing.** The four fixed board sizes (`tiny`/`small`/
+  `normal`/`large`, still the only options shown to non-JS browsers on
+  `/settings`) stay exactly as they were. `app.js` additionally measures the
+  real viewport (`window.innerWidth`/`innerHeight`) and asks the server, via
+  a `bsize=custom` + `bcell=<px>` cookie pair, to render the board at an
+  exact pixel cell size instead - so a 128x160 screen and a 240x320 screen
+  each get a board sized precisely for them, not just whichever preset is
+  closest. `/settings` also gained an "Automatic (JS-detected)" option to
+  opt back into this after manually picking a fixed preset.
+- **Live-feeling moves.** Instead of the `<meta http-equiv="refresh">` /
+  full-page-reload flow dumbphones use, `app.js` intercepts same-origin
+  link/form navigations inside the page and fetches them via `fetch()`,
+  swapping only the page's content in place (no full reload/flicker) and
+  updating the URL bar with `history.pushState`. It also polls faster
+  (capped at 4s) than the plain meta-refresh interval on pages that already
+  auto-refresh (e.g. an in-progress game waiting on the opponent, or "Quick
+  pair" search), so opponent moves and matches show up sooner. Cross-origin
+  links (the Lichess OAuth redirect, the "create a token" link) are always
+  left as real navigations - `fetch()` can't read their response anyway, and
+  a login redirect needs to be a real top-level navigation regardless.
+- **A light CSS layer** (`public/app.css`) that only applies once `app.js`
+  has tagged `<html>` with a `js` class - bigger tap targets, a cleaner nav
+  bar, a bit of visual polish. It never touches the board's own square/piece
+  styling (still generated server-side, inline, exactly as before), and none
+  of it applies at all if JavaScript doesn't run.
+
+None of this changes what any server route *returns* for a given request -
+a dumbphone and a JS-capable phone request the exact same HTML; the JS one
+just also loads `app.js`/`app.css` and layers the above on top in the
+browser. If something in `app.js` throws, or a `fetch()` fails, it always
+falls back to letting the browser do a normal navigation, so a bug there can
+make one interaction feel like a plain dumbphone page again, but shouldn't
+be able to leave the app stuck.
+
 ## How it's built
 
 - Cloudflare Worker, `src/index.js` entry using [Hono](https://hono.dev) for
@@ -57,7 +106,9 @@ plain HTML rendered on the server by a Cloudflare Worker.
   manual dashboard setup; `wrangler deploy` provisions it automatically
   from the `[[migrations]]` block in `wrangler.toml`.
 - Cloudflare Workers static assets (`[assets]` in `wrangler.toml`) serve the
-  chess piece icons from `public/images/*.png`
+  chess piece icons from `public/images/*.png`, plus the optional
+  `public/app.js` / `public/app.css` cloudphone progressive-enhancement
+  layer described above - both served as plain static files, no build step
 - [`chess.js`](https://github.com/jhlywa/chess.js) is used **only inside the
   Worker**, never shipped to the phone - all legality/checkmate/draw
   detection for the local AI mode happens server-side, and the tap-to-move
@@ -239,3 +290,10 @@ it's worth double-checking these against the real APIs once deployed:
   from caching/replaying them, but if your phone's browser does something
   unusual with back-navigation on a played move, that's the mechanism to
   look at first.
+- **`public/app.js`** (the cloudphone AJAX/auto-sizing enhancement): written
+  and reasoned through carefully, but not exercised against a real
+  Cloudmosa/Puffin device from this sandbox - worth confirming the board
+  auto-sizes sensibly on a real 128x160/240x320 screen, that in-place move/
+  opponent updates keep working smoothly across a few real moves, and that
+  a full login flow (including the external Lichess OAuth hop) still works
+  through the AJAX navigation layer.
